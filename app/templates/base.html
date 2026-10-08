@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#0b1430">
+  <title>{% block title %}HospitalOps{% endblock %} · HospitalOps</title>
+  <link href="/static/styles.css" rel="stylesheet">
+  <script src="/static/app.js" defer></script>
+  <style>:root{--brand:{{ hospital.color if hospital else '#2563eb' }}}</style>
+</head>
+<body class="{% if user and user.approval == 'approved' %}app-mode{% else %}auth-mode{% endif %}">
+{% if user and user.approval == 'approved' %}
+<div class="shell">
+ <aside class="sidebar" id="sidebar">
+  <a class="brand" href="/dashboard"><span class="brand-mark">H<span class="brand-plus">+</span></span><span><b>HospitalOps</b><small>WORKSPACE</small></span></a>
+  <div class="side-context"><div class="context-symbol">{{ (hospital.name[:1] if hospital else 'H')|upper }}</div><div><strong>{{ hospital.portal_name if hospital else 'Administración' }}</strong><small>{{ hospital.name if hospital else 'Configurar clientes' }}</small></div></div>
+  <nav class="nav">
+   <span class="nav-label">PRINCIPAL</span>
+   <a href="/dashboard" class="nav-link {% if request.url.path == '/dashboard' %}active{% endif %}"><span class="nav-icon">▦</span>Panel general</a>
+   {% if hospital and hospital.tickets_enabled %}<a href="/tickets" class="nav-link {% if request.url.path.startswith('/tickets') %}active{% endif %}"><span class="nav-icon">▤</span>Tickets <span class="nav-tail">↗</span></a>{% endif %}
+   {% if is_staff and hospital and hospital.inventory_enabled %}<span class="nav-label">OPERACIONES</span>
+   <a href="/inventory" class="nav-link {% if request.url.path.startswith('/inventory') %}active{% endif %}"><span class="nav-icon">▧</span>Inventario</a>
+   <a href="/counts" class="nav-link {% if request.url.path.startswith('/counts') %}active{% endif %}"><span class="nav-icon">◎</span>Conteos físicos</a>
+   <a href="/assets" class="nav-link {% if request.url.path.startswith('/assets') %}active{% endif %}"><span class="nav-icon">▣</span>Equipos</a>{% endif %}
+   {% if is_manager and hospital and hospital.crm_enabled %}<span class="nav-label">COMERCIAL</span>
+   <a href="/crm" class="nav-link {% if request.url.path == '/crm' or request.url.path.startswith('/crm/opportunities') %}active{% endif %}"><span class="nav-icon">◈</span>Pipeline CRM</a>
+   <a href="/crm/contacts" class="nav-link {% if request.url.path.startswith('/crm/contacts') %}active{% endif %}"><span class="nav-icon">♙</span>Contactos</a>{% endif %}
+   {% if is_admin or (user and user.role == 'superadmin') %}<span class="nav-label">ADMINISTRACIÓN</span>
+   {% if user.role == 'superadmin' %}<a href="/hospitals" class="nav-link {% if request.url.path.startswith('/hospitals') %}active{% endif %}"><span class="nav-icon">▥</span>Clientes / hospitales</a>{% endif %}
+   {% if hospital %}<a href="/users" class="nav-link {% if request.url.path.startswith('/users') %}active{% endif %}"><span class="nav-icon">♧</span>Usuarios</a>
+   <a href="/approvals" class="nav-link {% if request.url.path.startswith('/approvals') %}active{% endif %}"><span class="nav-icon">✓</span>Aprobaciones</a>
+   <a href="/departments" class="nav-link {% if request.url.path.startswith('/departments') %}active{% endif %}"><span class="nav-icon">⌗</span>Áreas y cargos</a>
+   <a href="/settings" class="nav-link {% if request.url.path.startswith('/settings') %}active{% endif %}"><span class="nav-icon">⚙</span>Personalización</a>
+   <a href="/audit" class="nav-link {% if request.url.path.startswith('/audit') %}active{% endif %}"><span class="nav-icon">◷</span>Auditoría</a>{% endif %}{% endif %}
+  </nav>
+  <div class="side-bottom"><div class="avatar">{{ user.name[:2]|upper }}</div><div class="user-identity"><strong>{{ user.name }}</strong><small>{{ roles[user.role] }}</small></div><form method="post" action="/logout"><input type="hidden" name="_csrf" value="{{ csrf_token }}"><button class="logout" title="Cerrar sesión" aria-label="Cerrar sesión">⇥</button></form></div>
+ </aside>
+ <div class="main-shell">
+  <header class="topbar"><div class="topbar-left"><button type="button" id="menu-toggle" class="icon-button mobile-only" aria-label="Abrir menú">☰</button><span class="breadcrumb">WORKSPACE <span class="breadcrumb-sep">/</span> {{ hospital.name if hospital else 'Plataforma' }}</span></div><div class="topbar-right">{% if user.role == 'superadmin' and hospitals %}<form method="post" action="/switch-hospital" class="tenant-switch"><input type="hidden" name="_csrf" value="{{ csrf_token }}"><select name="hospital_id" aria-label="Cambiar hospital" onchange="this.form.requestSubmit()">{% for h in hospitals if h.active %}<option value="{{ h.id }}" {% if hospital and hospital.id == h.id %}selected{% endif %}>{{ h.name }}</option>{% endfor %}</select></form>{% endif %}<span class="online-dot"></span><span class="topbar-user">{{ user.name }}</span><span class="top-avatar">{{ user.name[:1]|upper }}</span></div></header>
+  <main class="content">{% if flash %}<div class="alert alert-{{ flash.level }}"><span>{{ '✓' if flash.level == 'success' else '!' }}</span>{{ flash.message }}<button type="button" onclick="this.parentElement.remove()" aria-label="Cerrar alerta">×</button></div>{% endif %}{% block content %}{% endblock %}</main>
+  <footer class="footer">HospitalOps · Gestión hospitalaria centralizada <span>Versión 1.0</span></footer>
+ </div>
+</div>
+{% else %}
+ <div class="auth-layout"><div class="auth-hero"><a href="/login" class="brand"><span class="brand-mark">H<span class="brand-plus">+</span></span><span><b>HospitalOps</b><small>WORKSPACE</small></span></a><div class="auth-hero-copy"><div class="eyebrow light">GESTIÓN CONECTADA</div><h1>Todo tu hospital.<br>En un solo lugar.</h1><p>Tickets, inventario, equipos y oportunidades comerciales, en una plataforma segura para cada institución.</p><div class="hero-mock"><div class="hero-mock-top"><span></span><span></span><span></span></div><div class="hero-mock-content"><div class="mini-sidebar"></div><div class="mini-main"><div class="mock-line wide"></div><div class="mock-grid"><i></i><i></i><i></i></div><div class="mock-lines"><i></i><i></i><i></i><i></i></div></div></div></div></div><small>PLATAFORMA MULTI-HOSPITAL · CONTROL DE ACCESO POR ROL</small></div><div class="auth-main">{% if flash %}<div class="alert alert-{{ flash.level }}">{{ flash.message }}</div>{% endif %}{% block auth_content %}{% endblock %}</div></div>
+{% endif %}
+<div id="page-skeleton" class="page-skeleton" aria-hidden="true"><div class="skeleton-inner"><div class="skeleton-bar skeleton-title"></div><div class="skeleton-grid"><div class="skeleton-card"></div><div class="skeleton-card"></div><div class="skeleton-card"></div></div><div class="skeleton-bar skeleton-long"></div><div class="skeleton-bar skeleton-long"></div><div class="skeleton-bar skeleton-short"></div></div></div>
+</body></html>

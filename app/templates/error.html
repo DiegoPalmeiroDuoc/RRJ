@@ -1,0 +1,3 @@
+{% extends 'base.html' %}{% block title %}Error {{ code }}{% endblock %}
+{% block content %}<div class="empty full-empty"><div class="error-code">{{ code }}</div><h2>No se pudo completar la solicitud</h2><p>{{ detail }}</p><a href="/dashboard" class="btn btn-primary">Volver al panel</a></div>{% endblock %}
+{% block auth_content %}<div class="auth-card centered"><div class="error-code">{{ code }}</div><h2>Operación no disponible</h2><p>{{ detail }}</p><a class="btn btn-primary" href="/login">Ir a iniciar sesión</a></div>{% endblock %}
