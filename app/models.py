@@ -82,6 +82,7 @@ class Ticket(Base):
     asset_id: Mapped[int | None] = mapped_column(ForeignKey('assets.id'), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+    hospital: Mapped[Hospital] = relationship()
     requester: Mapped[User] = relationship(foreign_keys=[requester_id])
     assignee: Mapped[User | None] = relationship(foreign_keys=[assignee_id])
     confirmer: Mapped[User | None] = relationship(foreign_keys=[confirmed_by_id])
@@ -195,3 +196,63 @@ class AuditLog(Base):
     detail: Mapped[str] = mapped_column(String(250), default='')
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     actor: Mapped[User] = relationship()
+
+
+# Recursos de la empresa prestadora: no pertenecen a un hospital en particular.
+class ProviderItem(Base):
+    __tablename__ = 'provider_items'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    sku: Mapped[str] = mapped_column(String(60), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(160))
+    category: Mapped[str] = mapped_column(String(100), default='General')
+    location: Mapped[str] = mapped_column(String(120), default='Bodega central')
+    gross_cost: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0)
+    sale_price: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0)
+    stock: Mapped[int] = mapped_column(Integer, default=0)
+    min_stock: Mapped[int] = mapped_column(Integer, default=0)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class TechnicianStock(Base):
+    __tablename__ = 'technician_stock'
+    __table_args__ = (UniqueConstraint('item_id', 'technician_id'),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    item_id: Mapped[int] = mapped_column(ForeignKey('provider_items.id'), index=True)
+    technician_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    quantity: Mapped[int] = mapped_column(Integer, default=0)
+    item: Mapped[ProviderItem] = relationship()
+    technician: Mapped[User] = relationship()
+
+
+class ProviderMovement(Base):
+    __tablename__ = 'provider_movements'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    item_id: Mapped[int] = mapped_column(ForeignKey('provider_items.id'), index=True)
+    technician_id: Mapped[int | None] = mapped_column(ForeignKey('users.id'), nullable=True)
+    actor_id: Mapped[int] = mapped_column(ForeignKey('users.id'))
+    ticket_id: Mapped[int | None] = mapped_column(ForeignKey('tickets.id'), nullable=True)
+    hospital_id: Mapped[int | None] = mapped_column(ForeignKey('hospitals.id'), nullable=True)
+    kind: Mapped[str] = mapped_column(String(30))
+    quantity: Mapped[int] = mapped_column(Integer)
+    note: Mapped[str] = mapped_column(String(250))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    item: Mapped[ProviderItem] = relationship()
+    technician: Mapped[User | None] = relationship(foreign_keys=[technician_id])
+    actor: Mapped[User] = relationship(foreign_keys=[actor_id])
+    ticket: Mapped[Ticket | None] = relationship()
+
+
+class LoginAttempt(Base):
+    __tablename__ = 'login_attempts'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ip: Mapped[str] = mapped_column(String(48), index=True)
+    email_digest: Mapped[str] = mapped_column(String(64), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
+
+
+class SessionEpoch(Base):
+    """Server-side revocation for otherwise signed-cookie sessions."""
+    __tablename__ = 'session_epochs'
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), primary_key=True)
+    epoch: Mapped[int] = mapped_column(Integer, default=1)

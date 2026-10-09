@@ -120,3 +120,12 @@
     input.addEventListener('input', update);
   });
 })();
+
+// Acciones sin manejadores inline (compatibles con una CSP restrictiva).
+document.addEventListener('change', (ev) => {
+  if (ev.target.matches('[data-auto-submit]') && ev.target.form) ev.target.form.requestSubmit();
+});
+document.addEventListener('click', (ev) => {
+  const button = ev.target.closest('[data-dismiss-alert]');
+  if (button) button.closest('.alert')?.remove();
+});

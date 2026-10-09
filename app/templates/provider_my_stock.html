@@ -1,0 +1,7 @@
+{% extends 'base.html' %}{% block title %}Mis repuestos{% endblock %}{% block content %}
+<div class="page-heading"><div><h1>Mis repuestos</h1><p>Consumo de repuestos asociado a un ticket propio en proceso.</p></div></div>
+<section class="panel">{% for a in items %}<details class="provider-item"><summary><strong>{{ a.item.sku }} · {{ a.item.name }}</strong> — {{ a.quantity }} unidades</summary>
+<form method="post" action="/mis-repuestos/{{ a.item_id }}/consumir" class="form-stack"><input type="hidden" name="_csrf" value="{{ csrf_token }}">
+<label>Ticket<select name="ticket_id">{% for t in tickets %}<option value="{{ t.id }}">#{{ t.id }} · {{ t.title }}</option>{% endfor %}</select></label>
+<label>Unidades utilizadas<input name="quantity" type="number" min="1" max="{{ a.quantity }}" value="1"></label>
+<label>Observación<input name="note" required></label><button class="btn btn-primary" {% if not tickets %}disabled{% endif %}>Registrar consumo</button></form></details>{% else %}<p>No tienes repuestos entregados.</p>{% endfor %}</section>{% endblock %}

@@ -1,0 +1,8 @@
+{% extends 'base.html' %}{% block title %}Mi cuenta{% endblock %}{% block content %}
+<div class="page-heading"><div><h1>Mi cuenta</h1><p>Actualiza tu contraseña periódicamente.</p></div></div>
+<section class="panel form-panel"><div class="panel-header"><h2>{{ user.name }}</h2></div>
+<p>{{ user.email }} · {{ roles[user.role] }}</p>
+<form action="/perfil/password" method="post" class="form-stack"><input type="hidden" name="_csrf" value="{{ csrf_token }}">
+<label>Contraseña actual<input type="password" name="current_password" autocomplete="current-password" required></label>
+<label>Nueva contraseña (mínimo 12 caracteres)<input type="password" name="new_password" autocomplete="new-password" minlength="12" required></label>
+<button class="btn btn-primary">Cambiar contraseña y cerrar sesión</button></form></section>{% endblock %}

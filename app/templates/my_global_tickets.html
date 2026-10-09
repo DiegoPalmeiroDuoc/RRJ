@@ -1,0 +1,4 @@
+{% extends 'base.html' %}{% block title %}Mis tickets{% endblock %}{% block content %}
+<div class="page-heading"><div><h1>Mis tickets multihospital</h1><p>Únicamente tus tareas asignadas, de todos los clientes.</p></div></div>
+<section class="panel"><div class="table-responsive"><table><thead><tr><th>Ticket</th><th>Hospital</th><th>Estado</th><th>Prioridad</th></tr></thead><tbody>{% for t in items %}
+<tr><td><a href="/tickets/{{ t.id }}">#{{ t.id }} · {{ t.title }}</a></td><td>{{ t.hospital.name }}</td><td>{{ t.status }}</td><td>{{ t.priority }}</td></tr>{% else %}<tr><td colspan="4">No hay tickets asignados</td></tr>{% endfor %}</tbody></table></div></section>{% endblock %}

@@ -4,6 +4,8 @@ import io
 import os
 import re
 import secrets
+import hashlib
+from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -14,7 +16,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.middleware.sessions import SessionMiddleware
@@ -23,11 +25,21 @@ from app.database import get_db, init_db, SessionLocal
 from app.models import (
     Hospital, Department, User, Asset, Ticket, TicketComment,
     InventoryItem, InventoryMovement, StockCount, StockCountLine,
-    CRMContact, CRMOpportunity, AuditLog, now,
+    CRMContact, CRMOpportunity, AuditLog, ProviderItem, TechnicianStock, ProviderMovement, LoginAttempt, SessionEpoch, now,
 )
 from app.security import hash_password, verify_password
 
 BASE = os.path.dirname(__file__)
+PRODUCTION = os.environ.get('APP_ENV', 'development').lower() == 'production' or bool(os.environ.get('RAILWAY_ENVIRONMENT_NAME'))
+if PRODUCTION:
+    if len(os.environ.get('SESSION_SECRET', '')) < 40 or os.environ.get('SESSION_SECRET', '').startswith(('CAMBIA_', 'SOLO-')):
+        raise RuntimeError('Producción requiere SESSION_SECRET aleatorio de 40+ caracteres')
+    if os.environ.get('SESSION_HTTPS_ONLY', 'false').lower() != 'true':
+        raise RuntimeError('En producción SESSION_HTTPS_ONLY=true es obligatorio')
+    if not os.environ.get('DATABASE_URL', '').startswith(('postgresql://', 'postgresql+psycopg://', 'postgres://')):
+        raise RuntimeError('En producción es obligatorio PostgreSQL')
+    if not os.environ.get('ALLOWED_HOSTS', '').strip():
+        raise RuntimeError('En producción define ALLOWED_HOSTS')
 
 
 @asynccontextmanager
@@ -45,19 +57,40 @@ app.add_middleware(
     https_only=os.environ.get('SESSION_HTTPS_ONLY', 'false').lower() == 'true',
     max_age=60 * 60 * 10,
 )
+from starlette.middleware.trustedhost import TrustedHostMiddleware
+if PRODUCTION:
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=[h.strip() for h in os.environ['ALLOWED_HOSTS'].split(',')])
+
+@app.middleware('http')
+async def secure_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
+    response.headers['Permissions-Policy'] = 'camera=(self), microphone=(), geolocation=()'
+    response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+    if PRODUCTION:
+        response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
+    if request.url.path not in ('/static/styles.css', '/static/app.js'):
+        response.headers['Cache-Control'] = 'no-store'
+    return response
+
 app.mount('/static', StaticFiles(directory=os.path.join(BASE, 'static')), name='static')
 templates = Jinja2Templates(directory=os.path.join(BASE, 'templates'))
 
 ROLES = {
     'superadmin': 'Administrador de plataforma',
+    'coordinador_global': 'Coordinador empresa',
+    'tecnico_global': 'Técnico empresa',
     'admin_cliente': 'Administrador hospital',
     'coordinador': 'Coordinador',
     'tecnico': 'Técnico',
     'solicitante': 'Solicitante',
 }
 ADMINS = {'superadmin', 'admin_cliente'}
-MANAGERS = {'superadmin', 'admin_cliente', 'coordinador'}
-STAFF = MANAGERS | {'tecnico'}
+MANAGERS = {'superadmin', 'coordinador_global', 'admin_cliente', 'coordinador'}
+STAFF = MANAGERS | {'tecnico', 'tecnico_global'}
+PROVIDER_MANAGERS = {'superadmin', 'coordinador_global'}
 PRIORITIES = ['baja', 'media', 'alta', 'critica']
 TICKET_STATUSES = ['pendiente', 'abierto', 'en_proceso', 'resuelto', 'cerrado', 'rechazado']
 STAGES = ['nuevo', 'contactado', 'propuesta', 'negociacion', 'ganado', 'perdido']
@@ -131,6 +164,12 @@ def actor(request: Request, db: Session) -> User:
         raise HTTPException(401, 'Cuenta desactivada o sesión expirada')
     if user.approval != 'approved':
         raise HTTPException(403, 'Tu cuenta aún no está aprobada')
+    security = db.get(SessionEpoch, user.id)
+    if not security or request.session.get('epoch') != security.epoch:
+        request.session.clear()
+        raise HTTPException(401, 'Sesión revocada o expirada')
+    if user.role in ('superadmin', 'tecnico_global', 'coordinador_global') and user.hospital_id is not None:
+        raise HTTPException(403, 'El perfil de empresa no puede estar asignado a un hospital')
     if user.hospital_id and (not user.hospital or not user.hospital.active):
         request.session.clear()
         raise HTTPException(403, 'Hospital desactivado')
@@ -138,7 +177,7 @@ def actor(request: Request, db: Session) -> User:
 
 
 def hospital_for(request: Request, db: Session, user: User) -> Hospital:
-    if user.role != 'superadmin':
+    if user.role not in ('superadmin', 'coordinador_global', 'tecnico_global'):
         if not user.hospital_id:
             raise HTTPException(403, 'Usuario sin hospital')
         return user.hospital
@@ -153,10 +192,12 @@ def hospital_for(request: Request, db: Session, user: User) -> Hospital:
 
 def require(request: Request, db: Session, roles=None, module=None, allow_no_hospital=False):
     user = actor(request, db)
+    if user.role == 'tecnico_global' and module != 'tickets' and not allow_no_hospital:
+        raise HTTPException(403, 'Acceso limitado a tickets asignados')
     if roles and user.role not in roles:
         raise HTTPException(403, 'No tienes permisos para esta operación')
     hospital = None
-    if not allow_no_hospital:
+    if not allow_no_hospital and not (user.role == 'tecnico_global' and module == 'tickets'):
         hospital = hospital_for(request, db, user)
         if module and not getattr(hospital, f'{module}_enabled'):
             raise HTTPException(403, 'Módulo desactivado en este hospital')
@@ -174,17 +215,19 @@ def template(request: Request, db: Session, file: str, **context):
     user_id = request.session.get('uid')
     user = db.get(User, user_id) if user_id else None
     hospital = None
-    if user and user.active and user.approval == 'approved':
+    if user and user.active and user.approval == 'approved' and user.role != 'tecnico_global':
         try:
             hospital = hospital_for(request, db, user)
         except HTTPException:
             pass
-    hospitals = db.scalars(select(Hospital).order_by(Hospital.name)).all() if user and user.role == 'superadmin' else []
+    hospitals = db.scalars(select(Hospital).order_by(Hospital.name)).all() if user and user.role in PROVIDER_MANAGERS else []
     payload = {
         'request': request, 'user': user, 'hospital': hospital,
         'hospitals': hospitals, 'csrf_token': csrf(request),
         'flash': request.session.pop('flash', None), 'roles': ROLES,
         'is_admin': bool(user and user.role in ADMINS),
+        'is_provider': bool(user and user.role in PROVIDER_MANAGERS),
+        'is_provider_technician': bool(user and user.role == 'tecnico_global'),
         'is_manager': bool(user and user.role in MANAGERS),
         'is_staff': bool(user and user.role in STAFF),
         'stages': STAGES, 'priorities': PRIORITIES, 'ticket_statuses': TICKET_STATUSES,
@@ -254,20 +297,53 @@ def health():
     return {'status': 'ok'}
 
 
+FAKE_HASH = hash_password('EstaContrasenaNoEsValida!2026')
+
+@app.get('/ready', include_in_schema=False)
+def ready(db: Session = Depends(get_db)):
+    try:
+        db.execute(text('SELECT 1'))
+    except Exception:
+        raise HTTPException(503, 'Base de datos no disponible')
+    return {'status': 'ready'}
+
+
 @app.get('/login', response_class=HTMLResponse)
 def login_screen(request: Request, db: Session = Depends(get_db)):
     if request.session.get('uid'):
         account = db.get(User, request.session.get('uid'))
-        return redirect('/dashboard' if account and account.approval == 'approved' else '/pending')
-    return template(request, db, 'login.html')
+        security = db.get(SessionEpoch, account.id) if account else None
+        if account and security and request.session.get('epoch') == security.epoch:
+            return redirect('/dashboard' if account.approval == 'approved' else '/pending')
+        request.session.clear()
+    return template(request, db, 'login.html', registration_enabled=not PRODUCTION or os.getenv('ALLOW_SELF_REGISTRATION', 'false').lower() == 'true')
+
+
+def login_identifier(request, email):
+    ip = (request.client.host or 'unknown') if request.client else 'unknown'
+    digest = hashlib.sha256(email.encode('utf-8')).hexdigest()
+    return ip[:48], digest
+
+
+def login_blocked(db, ip, digest):
+    since = now() - timedelta(minutes=15)
+    by_ip = db.scalar(select(func.count(LoginAttempt.id)).where(LoginAttempt.ip == ip, LoginAttempt.created_at >= since))
+    by_email = db.scalar(select(func.count(LoginAttempt.id)).where(LoginAttempt.email_digest == digest, LoginAttempt.created_at >= since))
+    return by_ip >= 200 or by_email >= 8
 
 
 @app.post('/login')
 async def login(request: Request, db: Session = Depends(get_db)):
     data = await form_data(request)
     email = clean(data, 'email', 160).lower()
+    ip, digest = login_identifier(request, email)
+    if login_blocked(db, ip, digest):
+        raise HTTPException(429, 'Demasiados intentos. Intenta nuevamente en 15 minutos')
     user = db.scalar(select(User).where(User.email == email))
-    if not user or not verify_password(clean(data, 'password', 500), user.password_hash):
+    valid = verify_password(clean(data, 'password', 500), user.password_hash) if user else verify_password(clean(data, 'password', 500), FAKE_HASH)
+    if not user or not valid:
+        db.add(LoginAttempt(ip=ip, email_digest=digest))
+        db.commit()
         flash(request, 'Correo o contraseña incorrectos', 'error')
         return redirect('/login')
     if not user.active:
@@ -276,8 +352,16 @@ async def login(request: Request, db: Session = Depends(get_db)):
     if user.hospital_id and (not user.hospital or not user.hospital.active):
         flash(request, 'Hospital desactivado', 'error')
         return redirect('/login')
+    db.query(LoginAttempt).filter(LoginAttempt.email_digest == digest).delete(synchronize_session=False)
+    db.commit()
     request.session.clear()  # regeneración lógica de sesión para no conservar datos anteriores
+    security = db.get(SessionEpoch, user.id)
+    if security is None:
+        security = SessionEpoch(user_id=user.id, epoch=1)
+        db.add(security)
+        db.commit()
     request.session['uid'] = user.id
+    request.session['epoch'] = security.epoch
     csrf(request)
     return redirect('/pending' if user.approval != 'approved' else '/dashboard')
 
@@ -291,12 +375,16 @@ async def logout(request: Request):
 
 @app.get('/register', response_class=HTMLResponse)
 def register_screen(request: Request, db: Session = Depends(get_db)):
+    if PRODUCTION and os.getenv('ALLOW_SELF_REGISTRATION', 'false').lower() != 'true':
+        raise HTTPException(404, 'Registro público deshabilitado')
     hospitals = db.scalars(select(Hospital).where(Hospital.active.is_(True)).order_by(Hospital.name)).all()
     return template(request, db, 'register.html', public_hospitals=hospitals)
 
 
 @app.post('/register')
 async def register(request: Request, db: Session = Depends(get_db)):
+    if PRODUCTION and os.getenv('ALLOW_SELF_REGISTRATION', 'false').lower() != 'true':
+        raise HTTPException(404, 'Registro público deshabilitado')
     data = await form_data(request)
     email = clean(data, 'email', 160).lower()
     name = clean(data, 'name', 150)
@@ -324,13 +412,44 @@ def pending(request: Request, db: Session = Depends(get_db)):
     if not user:
         return redirect('/login')
     if user.approval == 'approved':
+        security = db.get(SessionEpoch, user.id)
+        if not security or request.session.get('epoch') != security.epoch:
+            request.session.clear()
+            return redirect('/login')
         return redirect('/dashboard')
     return template(request, db, 'pending.html', pending_user=user)
 
 
+@app.get('/perfil', response_class=HTMLResponse)
+def profile(request: Request, db: Session = Depends(get_db)):
+    require(request, db, allow_no_hospital=True)
+    return template(request, db, 'profile.html')
+
+
+@app.post('/perfil/password')
+async def change_password(request: Request, db: Session = Depends(get_db)):
+    user, _ = require(request, db, allow_no_hospital=True)
+    data = await form_data(request)
+    old = clean(data, 'current_password', 500)
+    new = clean(data, 'new_password', 500)
+    if not verify_password(old, user.password_hash):
+        raise HTTPException(400, 'Contraseña actual incorrecta')
+    if len(new) < 12 or len(new) > 128 or new == old:
+        raise HTTPException(400, 'La nueva contraseña debe tener entre 12 y 128 caracteres y ser distinta')
+    user.password_hash = hash_password(new)
+    security = db.get(SessionEpoch, user.id)
+    if security is not None:
+        security.epoch += 1
+    log(db, user, user.hospital_id, 'actualizar_contrasena', 'usuario', user.id)
+    db.commit()
+    request.session.clear()
+    flash(request, 'Contraseña actualizada. Ingresa nuevamente')
+    return redirect('/login')
+
+
 @app.post('/switch-hospital')
 async def switch_hospital(request: Request, db: Session = Depends(get_db)):
-    user, _ = require(request, db, {'superadmin'}, allow_no_hospital=True)
+    user, _ = require(request, db, PROVIDER_MANAGERS, allow_no_hospital=True)
     data = await form_data(request)
     hospital_id = chosen_id(data, 'hospital_id')
     hospital = db.scalar(select(Hospital).where(Hospital.id == hospital_id, Hospital.active.is_(True)))
@@ -342,7 +461,12 @@ async def switch_hospital(request: Request, db: Session = Depends(get_db)):
 
 @app.get('/dashboard', response_class=HTMLResponse)
 def dashboard(request: Request, db: Session = Depends(get_db)):
-    user, hospital = require(request, db)
+    user, hospital = require(request, db, allow_no_hospital=True)
+    if user.role == 'tecnico_global':
+        return redirect('/mis-tickets')
+    hospital = hospital_for(request, db, user)
+    if user.role == 'tecnico_global':
+        return redirect('/mis-tickets')
     query = select(Ticket).where(Ticket.hospital_id == hospital.id)
     if user.role == 'solicitante':
         query = query.where(Ticket.requester_id == user.id)
@@ -356,7 +480,10 @@ def dashboard(request: Request, db: Session = Depends(get_db)):
 
 @app.get('/api/dashboard')
 def api_dashboard(request: Request, db: Session = Depends(get_db)):
-    user, hospital = require(request, db)
+    user, hospital = require(request, db, allow_no_hospital=True)
+    if user.role == 'tecnico_global':
+        raise HTTPException(403)
+    hospital = hospital_for(request, db, user)
     ticket_where = [Ticket.hospital_id == hospital.id]
     if user.role == 'solicitante':
         ticket_where.append(Ticket.requester_id == user.id)
@@ -478,7 +605,7 @@ def user_edit(id: int, request: Request, db: Session = Depends(get_db)):
 
 def update_user(item, data, hospital, db, current, is_new=False):
     role = clean(data, 'role', 25)
-    if role not in ROLES or role == 'superadmin':
+    if role not in {'admin_cliente', 'coordinador', 'tecnico', 'solicitante'}:
         raise HTTPException(400, 'Rol no permitido')
     if item.id == current.id and role != current.role:
         raise HTTPException(403, 'No puedes cambiar tu propio rol')
@@ -493,12 +620,16 @@ def update_user(item, data, hospital, db, current, is_new=False):
         raise HTTPException(400, 'Área inválida')
     item.department_id = dep_id
     password = clean(data, 'password', 500)
-    if is_new and len(password) < 10:
-        raise HTTPException(400, 'La contraseña debe tener al menos 10 caracteres')
+    if is_new and len(password) < (12 if PRODUCTION else 10):
+        raise HTTPException(400, 'La contraseña debe tener al menos 12 caracteres en producción')
     if password:
-        if len(password) < 10:
-            raise HTTPException(400, 'La contraseña debe tener al menos 10 caracteres')
+        if len(password) < (12 if PRODUCTION else 10):
+            raise HTTPException(400, 'La contraseña debe tener al menos 12 caracteres en producción')
         item.password_hash = hash_password(password)
+        if not is_new:
+            security = db.get(SessionEpoch, item.id)
+            if security:
+                security.epoch += 1
     if not item.name or not re.fullmatch(r'[^@\s]+@[^@\s]+\.[^@\s]+', item.email):
         raise HTTPException(400, 'Nombre y correo válido son obligatorios')
     item.approval = 'approved'
@@ -632,10 +763,64 @@ async def assets_save(request: Request, id: int | None = None, db: Session = Dep
     flash(request, 'Equipo registrado')
     return redirect('/assets')
 
+# --- VISTA MULTIHOSPITAL PARA PERSONAL DE EMPRESA ---
+@app.get('/operaciones/tickets', response_class=HTMLResponse)
+def provider_tickets(request: Request, db: Session = Depends(get_db)):
+    user, _ = require(request, db, PROVIDER_MANAGERS, allow_no_hospital=True)
+    hospital_id = request.query_params.get('hospital_id', '')
+    status = request.query_params.get('status', '')
+    query = select(Ticket).join(Hospital, Hospital.id == Ticket.hospital_id)
+    if hospital_id.isdigit():
+        query = query.where(Ticket.hospital_id == int(hospital_id))
+    if status in TICKET_STATUSES:
+        query = query.where(Ticket.status == status)
+    page = max(1, min(int(request.query_params.get('page', '1')) if request.query_params.get('page','1').isdigit() else 1, 100000))
+    count = db.scalar(select(func.count()).select_from(query.subquery()))
+    items = db.scalars(query.order_by(Ticket.created_at.desc()).offset((page-1)*50).limit(50)).all()
+    hospitals = db.scalars(select(Hospital).order_by(Hospital.name)).all()
+    return template(request, db, 'provider_tickets.html', items=items, clients=hospitals,
+                    status=status, chosen_hospital=hospital_id, page=page, total=count)
+
+
+@app.post('/operaciones/abrir/{id}')
+async def provider_open_ticket(id: int, request: Request, db: Session = Depends(get_db)):
+    user, _ = require(request, db, PROVIDER_MANAGERS, allow_no_hospital=True)
+    await form_data(request)
+    item = db.get(Ticket, id)
+    if not item:
+        raise HTTPException(404)
+    request.session['hospital_id'] = item.hospital_id
+    return redirect(f'/tickets/{id}')
+
+
+@app.get('/mis-tickets', response_class=HTMLResponse)
+def my_global_tickets(request: Request, db: Session = Depends(get_db)):
+    user, _ = require(request, db, {'tecnico_global'}, allow_no_hospital=True)
+    items = db.scalars(select(Ticket).join(Hospital, Hospital.id == Ticket.hospital_id).where(
+        Ticket.assignee_id == user.id, Hospital.active.is_(True))
+                       .order_by(Ticket.created_at.desc()).limit(150)).all()
+    return template(request, db, 'my_global_tickets.html', items=items)
+
+
 # --- TICKETS ---
+def ticket_for_user(db, id, hospital, user):
+    if user.role == 'tecnico_global':
+        item = db.get(Ticket, id)
+        if not item or item.assignee_id != user.id:
+            raise HTTPException(404, 'Ticket no asignado')
+        active = db.scalar(select(Hospital.id).where(Hospital.id == item.hospital_id,
+                                                    Hospital.active.is_(True), Hospital.tickets_enabled.is_(True)))
+        if not active:
+            raise HTTPException(404, 'Hospital no disponible')
+        return item
+    return scoped(db, Ticket, id, hospital)
+
+
 def ticket_visible(user, ticket):
     if user.role == 'solicitante' and ticket.requester_id != user.id:
         raise HTTPException(404, 'Ticket no encontrado')
+    if user.role == 'tecnico_global' and ticket.assignee_id != user.id:
+        raise HTTPException(404, 'Ticket no asignado')
     if user.role == 'tecnico' and ticket.assignee_id != user.id and ticket.requester_id != user.id:
         raise HTTPException(404, 'Ticket no asignado a tu cuenta')
 
@@ -661,6 +846,8 @@ def tickets(request: Request, db: Session = Depends(get_db)):
 @app.get('/tickets/new', response_class=HTMLResponse)
 def ticket_new(request: Request, db: Session = Depends(get_db)):
     user, hospital = require(request, db, module='tickets')
+    if user.role == 'tecnico_global':
+        raise HTTPException(403)
     assets = db.scalars(select(Asset).where(Asset.hospital_id == hospital.id, Asset.active.is_(True))).all()
     return template(request, db, 'ticket_form.html', assets=assets)
 
@@ -668,6 +855,8 @@ def ticket_new(request: Request, db: Session = Depends(get_db)):
 @app.post('/tickets/new')
 async def ticket_create(request: Request, db: Session = Depends(get_db)):
     user, hospital = require(request, db, module='tickets')
+    if user.role == 'tecnico_global':
+        raise HTTPException(403)
     data = await form_data(request)
     title, description = clean(data, 'title', 200), clean(data, 'description', 5000)
     if not title or not description:
@@ -693,14 +882,15 @@ async def ticket_create(request: Request, db: Session = Depends(get_db)):
 @app.get('/tickets/{id}', response_class=HTMLResponse)
 def ticket_detail(id: int, request: Request, db: Session = Depends(get_db)):
     user, hospital = require(request, db, module='tickets')
-    item = scoped(db, Ticket, id, hospital)
+    item = ticket_for_user(db, id, hospital, user)
     ticket_visible(user, item)
     query = select(TicketComment).where(TicketComment.ticket_id == id)
     if user.role == 'solicitante':
         query = query.where(TicketComment.internal.is_(False))
     comments = db.scalars(query.order_by(TicketComment.created_at)).all()
-    assignees = db.scalars(select(User).where(User.hospital_id == hospital.id,
-                                               User.role.in_(['coordinador', 'tecnico']),
+    assignees = db.scalars(select(User).where(or_(
+                                               (User.hospital_id == hospital.id) & User.role.in_(['coordinador', 'tecnico']),
+                                               (User.role == 'tecnico_global') & User.hospital_id.is_(None)),
                                                User.active.is_(True), User.approval == 'approved').order_by(User.name)).all() if user.role in MANAGERS else []
     return template(request, db, 'ticket_detail.html', item=item, comments=comments, assignees=assignees)
 
@@ -709,7 +899,7 @@ def ticket_detail(id: int, request: Request, db: Session = Depends(get_db)):
 async def ticket_confirm(id: int, request: Request, db: Session = Depends(get_db)):
     user, hospital = require(request, db, ADMINS, 'tickets')
     await form_data(request)
-    item = scoped(db, Ticket, id, hospital)
+    item = ticket_for_user(db, id, hospital, user)
     if item.status != 'pendiente':
         raise HTTPException(409, 'El ticket ya fue confirmado o rechazado')
     item.status = 'abierto'
@@ -725,7 +915,7 @@ async def ticket_confirm(id: int, request: Request, db: Session = Depends(get_db
 async def ticket_reject(id: int, request: Request, db: Session = Depends(get_db)):
     user, hospital = require(request, db, ADMINS, 'tickets')
     await form_data(request)
-    item = scoped(db, Ticket, id, hospital)
+    item = ticket_for_user(db, id, hospital, user)
     if item.status != 'pendiente':
         raise HTTPException(409, 'Solo se rechazan tickets pendientes')
     item.status = 'rechazado'
@@ -739,11 +929,17 @@ async def ticket_reject(id: int, request: Request, db: Session = Depends(get_db)
 async def ticket_assign(id: int, request: Request, db: Session = Depends(get_db)):
     user, hospital = require(request, db, MANAGERS, 'tickets')
     data = await form_data(request)
-    item = scoped(db, Ticket, id, hospital)
+    item = ticket_for_user(db, id, hospital, user)
     if item.status in ('pendiente', 'rechazado', 'cerrado'):
         raise HTTPException(409, 'Confirma el ticket antes de asignar')
     user_id = chosen_id(data, 'assignee_id')
-    ensure_hospital_user(db, user_id, hospital, {'tecnico', 'coordinador'})
+    if user_id:
+        candidate = db.get(User, user_id)
+        if not candidate or not candidate.active or candidate.approval != 'approved' or not (
+            (candidate.hospital_id == hospital.id and candidate.role in ('tecnico', 'coordinador')) or
+            (candidate.role == 'tecnico_global' and candidate.hospital_id is None)
+        ):
+            raise HTTPException(400, 'Técnico no autorizado')
     item.assignee_id = user_id
     log(db, user, hospital.id, 'asignar', 'ticket', id, f'Responsable: {user_id}')
     db.commit()
@@ -755,7 +951,7 @@ async def ticket_assign(id: int, request: Request, db: Session = Depends(get_db)
 async def ticket_update_status(id: int, request: Request, db: Session = Depends(get_db)):
     user, hospital = require(request, db, STAFF, 'tickets')
     data = await form_data(request)
-    item = scoped(db, Ticket, id, hospital)
+    item = ticket_for_user(db, id, hospital, user)
     ticket_visible(user, item)
     new_status = clean(data, 'status', 25)
     allowed = {
@@ -766,10 +962,10 @@ async def ticket_update_status(id: int, request: Request, db: Session = Depends(
     }
     if new_status not in allowed.get(item.status, set()):
         raise HTTPException(400, 'Transición de estado no permitida')
-    if user.role == 'tecnico' and (item.assignee_id != user.id or new_status not in ('en_proceso', 'resuelto', 'abierto')):
+    if user.role in ('tecnico', 'tecnico_global') and (item.assignee_id != user.id or new_status not in ('en_proceso', 'resuelto', 'abierto')):
         raise HTTPException(403)
     item.status = new_status
-    log(db, user, hospital.id, 'estado', 'ticket', id, new_status)
+    log(db, user, item.hospital_id, 'estado', 'ticket', id, new_status)
     db.commit()
     flash(request, 'Estado actualizado')
     return redirect(f'/tickets/{id}')
@@ -779,7 +975,7 @@ async def ticket_update_status(id: int, request: Request, db: Session = Depends(
 async def ticket_requester_close(id: int, request: Request, db: Session = Depends(get_db)):
     user, hospital = require(request, db, module='tickets')
     await form_data(request)
-    item = scoped(db, Ticket, id, hospital)
+    item = ticket_for_user(db, id, hospital, user)
     if user.role != 'solicitante' or item.requester_id != user.id or item.status != 'resuelto':
         raise HTTPException(403, 'Solo el solicitante puede aceptar la resolución')
     item.status = 'cerrado'
@@ -793,7 +989,7 @@ async def ticket_requester_close(id: int, request: Request, db: Session = Depend
 async def ticket_comment(id: int, request: Request, db: Session = Depends(get_db)):
     user, hospital = require(request, db, module='tickets')
     data = await form_data(request)
-    item = scoped(db, Ticket, id, hospital)
+    item = ticket_for_user(db, id, hospital, user)
     ticket_visible(user, item)
     body = clean(data, 'body', 4000)
     if not body:
@@ -802,7 +998,7 @@ async def ticket_comment(id: int, request: Request, db: Session = Depends(get_db
     if internal and user.role not in STAFF:
         raise HTTPException(403)
     db.add(TicketComment(ticket_id=id, author_id=user.id, body=body, internal=internal))
-    log(db, user, hospital.id, 'comentar', 'ticket', id, 'Nota interna' if internal else 'Comentario')
+    log(db, user, item.hospital_id, 'comentar', 'ticket', id, 'Nota interna' if internal else 'Comentario')
     db.commit()
     flash(request, 'Comentario publicado')
     return redirect(f'/tickets/{id}#comments')
@@ -1145,3 +1341,259 @@ def audit(request: Request, db: Session = Depends(get_db)):
 
 
 # Database initialization is handled by the FastAPI lifespan context above.
+
+
+# --- EQUIPO PROVEEDOR: usuarios sin pertenencia a hospitales ---
+@app.get('/equipo', response_class=HTMLResponse)
+def provider_team(request: Request, db: Session = Depends(get_db)):
+    user, _ = require(request, db, PROVIDER_MANAGERS, allow_no_hospital=True)
+    items = db.scalars(select(User).where(User.role.in_(['coordinador_global', 'tecnico_global']))
+                       .order_by(User.name)).all()
+    return template(request, db, 'provider_team.html', items=items)
+
+
+@app.post('/equipo/crear')
+async def provider_add_user(request: Request, db: Session = Depends(get_db)):
+    actor_user, _ = require(request, db, {'superadmin'}, allow_no_hospital=True)
+    data = await form_data(request)
+    name, email = clean(data, 'name', 150), clean(data, 'email', 160).lower()
+    role, password = clean(data, 'role', 25), clean(data, 'password', 500)
+    if (not name or not re.fullmatch(r'[^@\s]+@[^@\s]+\.[^@\s]+', email)
+        or role not in ('coordinador_global', 'tecnico_global') or len(password) < 12):
+        raise HTTPException(400, 'Nombre, correo, rol y contraseña de 12+ caracteres son obligatorios')
+    item = User(name=name, email=email, role=role, password_hash=hash_password(password),
+                hospital_id=None, approval='approved', active=True)
+    db.add(item)
+    safe_flush(db, 'Correo ya registrado')
+    log(db, actor_user, None, 'crear', 'equipo_empresa', item.id, name)
+    unique_commit(db)
+    flash(request, 'Integrante creado. Debe cambiar su contraseña en Mi cuenta')
+    return redirect('/equipo')
+
+
+@app.post('/equipo/{id}/reset-password')
+async def provider_reset_password(id: int, request: Request, db: Session = Depends(get_db)):
+    manager, _ = require(request, db, {'superadmin'}, allow_no_hospital=True)
+    data = await form_data(request)
+    item = db.get(User, id)
+    new_password = clean(data, 'password', 500)
+    if (not item or item.role not in ('tecnico_global', 'coordinador_global')
+        or item.hospital_id is not None):
+        raise HTTPException(404)
+    if len(new_password) < 12 or len(new_password) > 128:
+        raise HTTPException(400, 'Contraseña inválida: 12 a 128 caracteres')
+    item.password_hash = hash_password(new_password)
+    security = db.get(SessionEpoch, item.id)
+    if security:
+        security.epoch += 1
+    log(db, manager, None, 'reset_contrasena', 'equipo_empresa', id)
+    db.commit()
+    flash(request, 'Contraseña restablecida; se revocaron las sesiones previas')
+    return redirect('/equipo')
+
+
+@app.post('/equipo/{id}/activar')
+async def provider_toggle_user(id: int, request: Request, db: Session = Depends(get_db)):
+    manager, _ = require(request, db, {'superadmin'}, allow_no_hospital=True)
+    await form_data(request)
+    user = db.get(User, id)
+    if not user or user.role not in ('tecnico_global', 'coordinador_global') or user.hospital_id is not None:
+        raise HTTPException(404, 'Usuario no encontrado')
+    user.active = not user.active
+    log(db, manager, None, 'cambiar_acceso', 'equipo_empresa', id, 'Activo' if user.active else 'Inactivo')
+    db.commit()
+    flash(request, 'Acceso actualizado')
+    return redirect('/equipo')
+
+
+# --- BODEGA CENTRAL DE LA EMPRESA PRESTADORA ---
+@app.get('/bodega', response_class=HTMLResponse)
+def provider_warehouse(request: Request, db: Session = Depends(get_db)):
+    manager, _ = require(request, db, PROVIDER_MANAGERS, allow_no_hospital=True)
+    items = db.scalars(select(ProviderItem).order_by(ProviderItem.name).limit(500)).all()
+    users = db.scalars(select(User).where(User.role == 'tecnico_global', User.active.is_(True),
+                                          User.approval == 'approved').order_by(User.name)).all()
+    allocations = db.scalars(select(TechnicianStock).where(TechnicianStock.quantity > 0).order_by(TechnicianStock.id.desc()).limit(500)).all()
+    movements = db.scalars(select(ProviderMovement).order_by(ProviderMovement.id.desc()).limit(75)).all()
+    return template(request, db, 'provider_warehouse.html', items=items, users=users,
+                    allocations=allocations, movements=movements)
+
+
+@app.post('/bodega/crear')
+async def provider_item_create(request: Request, db: Session = Depends(get_db)):
+    manager, _ = require(request, db, PROVIDER_MANAGERS, allow_no_hospital=True)
+    data = await form_data(request)
+    sku, name = clean(data, 'sku', 60).upper(), clean(data, 'name', 160)
+    if not sku or not name:
+        raise HTTPException(400, 'SKU y nombre son obligatorios')
+    item = ProviderItem(sku=sku, name=name, category=clean(data, 'category', 100) or 'General',
+                        location=clean(data, 'location', 120) or 'Bodega central',
+                        gross_cost=money(data, 'gross_cost'), sale_price=money(data, 'sale_price'),
+                        stock=positive_int(data, 'stock'), min_stock=positive_int(data, 'min_stock'))
+    db.add(item)
+    safe_flush(db, 'SKU ya existe')
+    if item.stock:
+        db.add(ProviderMovement(item_id=item.id, actor_id=manager.id, kind='inicial',
+                                quantity=item.stock, note='Carga inicial'))
+    log(db, manager, None, 'crear', 'bodega_producto', item.id, sku)
+    unique_commit(db)
+    flash(request, 'Producto de bodega registrado')
+    return redirect('/bodega')
+
+
+@app.post('/bodega/{id}/editar')
+async def provider_item_update(id: int, request: Request, db: Session = Depends(get_db)):
+    manager, _ = require(request, db, PROVIDER_MANAGERS, allow_no_hospital=True)
+    data = await form_data(request)
+    item = db.get(ProviderItem, id)
+    if not item:
+        raise HTTPException(404)
+    item.name = clean(data, 'name', 160)
+    item.sku = clean(data, 'sku', 60).upper()
+    item.category = clean(data, 'category', 100) or 'General'
+    item.location = clean(data, 'location', 120) or 'Bodega central'
+    item.gross_cost, item.sale_price = money(data, 'gross_cost'), money(data, 'sale_price')
+    item.min_stock = positive_int(data, 'min_stock')
+    item.active = data.get('active') == 'on'
+    if not item.name or not item.sku:
+        raise HTTPException(400, 'SKU y nombre obligatorios')
+    log(db, manager, None, 'editar', 'bodega_producto', item.id, item.name)
+    unique_commit(db, 'El SKU está siendo utilizado')
+    return redirect('/bodega')
+
+
+def lock_provider_item(db, id, require_active=True):
+    item = db.scalar(select(ProviderItem).where(ProviderItem.id == id).with_for_update())
+    if not item or (require_active and not item.active):
+        raise HTTPException(404, 'Producto inexistente o inactivo')
+    return item
+
+
+def valid_provider_technician(db, technician_id):
+    tech = db.get(User, technician_id) if technician_id else None
+    if not tech or tech.role != 'tecnico_global' or tech.hospital_id is not None or not tech.active or tech.approval != 'approved':
+        raise HTTPException(400, 'Técnico inválido')
+    return tech
+
+
+@app.post('/bodega/{id}/movimiento')
+async def provider_warehouse_movement(id: int, request: Request, db: Session = Depends(get_db)):
+    manager, _ = require(request, db, PROVIDER_MANAGERS, allow_no_hospital=True)
+    data = await form_data(request)
+    item = lock_provider_item(db, id)
+    kind = clean(data, 'kind', 20)
+    quantity = positive_int(data, 'quantity')
+    note = clean(data, 'note', 250)
+    if not note or kind not in ('entrada', 'salida', 'ajuste'):
+        raise HTTPException(400, 'Movimiento inválido')
+    if quantity == 0 and kind != 'ajuste':
+        raise HTTPException(400, 'Cantidad inválida')
+    delta = quantity if kind == 'entrada' else -quantity if kind == 'salida' else quantity - item.stock
+    if item.stock + delta < 0:
+        raise HTTPException(409, 'Stock insuficiente')
+    item.stock += delta
+    db.add(ProviderMovement(item_id=id, actor_id=manager.id, kind=kind,
+                            quantity=delta, note=note))
+    log(db, manager, None, kind, 'bodega_producto', id, f'{delta:+d} — {note}')
+    db.commit()
+    return redirect('/bodega')
+
+
+@app.post('/bodega/{id}/asignar')
+async def provider_assign_stock(id: int, request: Request, db: Session = Depends(get_db)):
+    manager, _ = require(request, db, PROVIDER_MANAGERS, allow_no_hospital=True)
+    data = await form_data(request)
+    item = lock_provider_item(db, id)
+    tech_id = chosen_id(data, 'technician_id')
+    valid_provider_technician(db, tech_id)
+    qty = positive_int(data, 'quantity')
+    if qty <= 0 or qty > item.stock:
+        raise HTTPException(409, 'Cantidad superior al stock disponible')
+    # Se requiere bloqueo del stock central; la asignación es única por producto y técnico.
+    allocation = db.scalar(select(TechnicianStock).where(TechnicianStock.item_id == id,
+        TechnicianStock.technician_id == tech_id).with_for_update())
+    if allocation is None:
+        allocation = TechnicianStock(item_id=id, technician_id=tech_id, quantity=0)
+        db.add(allocation)
+    allocation.quantity += qty
+    item.stock -= qty
+    db.add(ProviderMovement(item_id=id, technician_id=tech_id, actor_id=manager.id,
+                            kind='asignacion', quantity=qty, note='Entrega a técnico'))
+    log(db, manager, None, 'entrega', 'bodega_producto', id, f'{qty} unidades -> técnico {tech_id}')
+    unique_commit(db, 'Asignación concurrente: vuelve a intentar')
+    return redirect('/bodega')
+
+
+@app.post('/bodega/{id}/devolver')
+async def provider_return_stock(id: int, request: Request, db: Session = Depends(get_db)):
+    manager, _ = require(request, db, PROVIDER_MANAGERS, allow_no_hospital=True)
+    data = await form_data(request)
+    item = lock_provider_item(db, id, require_active=False)
+    tech_id = chosen_id(data, 'technician_id')
+    allocation = db.scalar(select(TechnicianStock).where(TechnicianStock.item_id == id,
+            TechnicianStock.technician_id == tech_id).with_for_update())
+    qty = positive_int(data, 'quantity')
+    if not allocation or qty < 1 or qty > allocation.quantity:
+        raise HTTPException(409, 'Técnico no tiene esa cantidad')
+    allocation.quantity -= qty
+    item.stock += qty
+    db.add(ProviderMovement(item_id=id, technician_id=tech_id, actor_id=manager.id,
+                            kind='devolucion', quantity=qty, note='Devolución a bodega'))
+    log(db, manager, None, 'devolucion', 'bodega_producto', id, str(qty))
+    db.commit()
+    return redirect('/bodega')
+
+
+@app.get('/mis-repuestos', response_class=HTMLResponse)
+def provider_my_stock(request: Request, db: Session = Depends(get_db)):
+    user, _ = require(request, db, {'tecnico_global'}, allow_no_hospital=True)
+    items = db.scalars(select(TechnicianStock).where(TechnicianStock.technician_id == user.id,
+                                                     TechnicianStock.quantity > 0)).all()
+    assigned = db.scalars(select(Ticket).join(Hospital, Hospital.id == Ticket.hospital_id).where(
+        Ticket.assignee_id == user.id, Hospital.active.is_(True), Ticket.status.in_(['abierto', 'en_proceso'])).order_by(Ticket.id.desc())).all()
+    return template(request, db, 'provider_my_stock.html', items=items, tickets=assigned)
+
+
+@app.post('/mis-repuestos/{id}/consumir')
+async def provider_consume_stock(id: int, request: Request, db: Session = Depends(get_db)):
+    technician, _ = require(request, db, {'tecnico_global'}, allow_no_hospital=True)
+    data = await form_data(request)
+    ticket_id = chosen_id(data, 'ticket_id')
+    qty = positive_int(data, 'quantity')
+    note = clean(data, 'note', 250)
+    ticket = db.get(Ticket, ticket_id) if ticket_id else None
+    if (not ticket or ticket.assignee_id != technician.id or ticket.status not in ('abierto', 'en_proceso')
+        or not db.scalar(select(Hospital.id).where(Hospital.id == ticket.hospital_id, Hospital.active.is_(True)))):
+        raise HTTPException(403, 'Solo puedes registrar consumo en tus tickets abiertos')
+    if qty < 1 or not note:
+        raise HTTPException(400, 'Cantidad y motivo obligatorios')
+    item = lock_provider_item(db, id)
+    allocation = db.scalar(select(TechnicianStock).where(TechnicianStock.item_id == id,
+            TechnicianStock.technician_id == technician.id).with_for_update())
+    if not allocation or allocation.quantity < qty:
+        raise HTTPException(409, 'Stock de técnico insuficiente')
+    allocation.quantity -= qty
+    db.add(ProviderMovement(item_id=id, actor_id=technician.id, technician_id=technician.id,
+                            ticket_id=ticket.id, hospital_id=ticket.hospital_id,
+                            kind='consumo', quantity=qty, note=note))
+    log(db, technician, ticket.hospital_id, 'consumo', 'bodega_producto', id, f'{qty} unidades en ticket {ticket.id}')
+    db.commit()
+    flash(request, 'Consumo registrado en ticket')
+    return redirect('/mis-repuestos')
+
+
+@app.get('/bodega/export/csv')
+def provider_warehouse_export(request: Request, db: Session = Depends(get_db)):
+    require(request, db, PROVIDER_MANAGERS, allow_no_hospital=True)
+    items = db.scalars(select(ProviderItem).order_by(ProviderItem.sku)).all()
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(['SKU','Producto','Categoría','Ubicación','Costo bruto','Precio venta','Stock bodega','Stock mínimo'])
+    def escape_csv(value):
+        text_value = str(value if value is not None else '')
+        return "'" + text_value if text_value.startswith(('=', '+', '-', '@', '\t', '\r')) else text_value
+    for item in items:
+        writer.writerow([escape_csv(v) for v in (item.sku,item.name,item.category,item.location,
+            item.gross_cost,item.sale_price,item.stock,item.min_stock)])
+    return StreamingResponse(iter([output.getvalue().encode('utf-8-sig')]), media_type='text/csv',
+                             headers={'Content-Disposition':'attachment; filename="bodega_empresa.csv"'})

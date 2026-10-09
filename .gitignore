@@ -1,9 +1,25 @@
+# Credenciales y datos reales
+.env
+.env.*
+!.env.example
+!.env.production.example
+*.pem
+*.key
+*.p12
+*.pfx
+backups/
+*.dump
+*.backup
+*.sql.gz
+# Python, pruebas y desarrollo
 .venv/
+venv/
 __pycache__/
 .pytest_cache/
 *.pyc
-.env
 *.db
 *.db-journal
 *.sqlite3
 .DS_Store
+.coverage
+htmlcov/

@@ -1,3 +1,6 @@
+import os
+if os.getenv('APP_ENV', 'development').lower() == 'production' or os.getenv('RAILWAY_ENVIRONMENT_NAME'):
+    raise SystemExit('ERROR: seed.py no debe ejecutarse en producción')
 """Carga demostrativa opcional. Nunca utilizar cuentas demo en producción."""
 from decimal import Decimal
 from sqlalchemy import select

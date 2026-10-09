@@ -1,0 +1,12 @@
+{% extends 'base.html' %}{% block title %}Equipo de soporte{% endblock %}{% block content %}
+<div class="page-heading"><div><h1>Equipo de la empresa</h1><p>Coordinadores y técnicos con acceso multihospital.</p></div></div>
+{% if user.role == 'superadmin' %}<section class="panel form-panel"><div class="panel-header"><h2>Agregar integrante</h2></div>
+<form method="post" action="/equipo/crear" class="form-stack"><input type="hidden" name="_csrf" value="{{ csrf_token }}">
+<label>Nombre<input name="name" required maxlength="150"></label><label>Correo<input type="email" name="email" required></label>
+<label>Rol<select name="role"><option value="tecnico_global">Técnico empresa (tickets asignados)</option><option value="coordinador_global">Coordinador empresa (todos los hospitales)</option></select></label>
+<label>Contraseña inicial<input name="password" type="password" minlength="12" required></label>
+<button class="btn btn-primary">Crear integrante</button></form></section>{% endif %}
+<section class="panel"><div class="panel-header"><h2>Equipo registrado</h2></div><div class="table-responsive"><table><thead><tr><th>Nombre</th><th>Correo</th><th>Perfil</th><th>Estado</th><th></th></tr></thead><tbody>
+{% for m in items %}<tr><td>{{ m.name }}</td><td>{{ m.email }}</td><td>{{ roles[m.role] }}</td><td>{{ 'Activo' if m.active else 'Desactivado' }}</td>
+<td>{% if user.role == 'superadmin' %}<form method="post" action="/equipo/{{ m.id }}/reset-password" class="form-stack"><input type="hidden" name="_csrf" value="{{ csrf_token }}"><input type="password" name="password" minlength="12" placeholder="Nueva contraseña" required><button class="btn btn-secondary btn-small">Restablecer clave</button></form><form method="post" action="/equipo/{{ m.id }}/activar"><input type="hidden" name="_csrf" value="{{ csrf_token }}"><button class="btn btn-secondary btn-small">{{ 'Desactivar' if m.active else 'Activar' }}</button></form>{% endif %}</td></tr>
+{% else %}<tr><td colspan="5">Aún no hay integrantes</td></tr>{% endfor %}</tbody></table></div></section>{% endblock %}

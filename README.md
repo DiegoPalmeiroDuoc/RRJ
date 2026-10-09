@@ -1,220 +1,134 @@
-# HospitalOps — Gestión hospitalaria multi-cliente
+# HospitalOps Comercial 1.1 — Empresa de soporte multihospital
 
-Aplicación web **runnable**, en español, con clientes (hospitales) aislados, tickets sujetos a confirmación administrativa, solicitantes aprobados por admins, inventario/Kardex, conteo físico, equipos, CRM tipo Kanban, personalización por hospital y skeletons durante la carga.
+Aplicación web en español para **una empresa prestadora de servicios técnicos** que administra más de 20 clientes hospitalarios y alrededor de 30 técnicos, con una sola plataforma y separación por institución.
 
-**Stack:** FastAPI + Python 3.11+, SQLAlchemy 2, Jinja2, JavaScript vanilla, CSS responsive y SQLite (desarrollo). PostgreSQL y Docker Compose disponibles para despliegue. Sin dependencias JS ni CDN. Interfaz server-rendered con widgets de carga asíncrona.
+> **Estado de entrega:** código fuente, vistas, pruebas automatizadas, contenedorización y manuales disponibles. **No se declara producción certificada**: es obligatorio completar un piloto en infraestructura real, respaldo/restauración verificados, revisión de seguridad independiente y aceptación del cliente. No incluye servicio de hosting ni cuentas externas ya contratadas.
 
-## Inicio rápido: Windows PowerShell
+## Instalación en Windows / VS Code (sin datos de demo)
+
+Abre la carpeta `hospitalops` del ZIP (contiene `requirements.txt` y `app/`):
 
 ```powershell
-cd hospitalops
 py -3 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 pip install -r requirements.txt
 Copy-Item .env.example .env
-# Abrir .env y reemplazar SESSION_SECRET por una cadena aleatoria larga
-python seed.py
-python -m uvicorn app.main:app --reload --port 8000
-```
-
-Si PowerShell bloquea la activación, ejecuta `Set-ExecutionPolicy -Scope Process Bypass` en esa terminal o usa `.venv\Scripts\python.exe` explícitamente.
-
-## Inicio rápido: macOS / Linux
-
-```bash
-cd hospitalops
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-cp .env.example .env
-# Cambia SESSION_SECRET antes de publicar la aplicación
-python seed.py
-python -m uvicorn app.main:app --reload --port 8000
-```
-
-Abre **http://127.0.0.1:8000**. La base `hospitalops.db` se crea automáticamente durante el arranque o al ejecutar el seed. El seed se ejecuta **solo si no existen usuarios** y jamás reemplaza datos existentes.
-
-### Usuarios de demostración
-
-Todos usan contraseña temporal **`DemoSeguro2026!`**. Cuentas simuladas; no usar públicamente ni en producción.
-
-| Rol | Correo | Hospital |
-|---|---|---|
-| Superadministrador | `root@hospitalops.example` | Todos |
-| Administrador cliente | `admin@norte.example` | Hospital Demo Norte |
-| Coordinador | `coordinador@norte.example` | Hospital Demo Norte |
-| Técnico | `tecnico@norte.example` | Hospital Demo Norte |
-| Solicitante | `solicitante@norte.example` | Hospital Demo Norte |
-| Cuenta pendiente | `pendiente@norte.example` | Hospital Demo Norte |
-| Admin segundo hospital | `admin@sur.example` | Hospital Demo Sur |
-| Solicitante segundo hospital | `solicitante@sur.example` | Hospital Demo Sur |
-
-**Flujo sugerido:** entra con superadmin para ver los dos hospitales. Ingresa luego con `admin@norte.example`, ve **Aprobaciones** y valida a `pendiente@norte.example`. Con `solicitante@norte.example` crea un ticket; vuelve a entrar como administrador para confirmarlo, asígnalo a un técnico y haz seguimiento.
-
-## Vistas incluidas
-
-| Vista | Ruta | Acceso |
-|---|---|---|
-| Login | `/login` | Público |
-| Registro (solicitud de aprobación) | `/register` | Público |
-| Estado pendiente / rechazado | `/pending` | Solicitante en revisión |
-| Dashboard con métricas asíncronas | `/dashboard` | Todos los aprobados |
-| Clientes / hospitales | `/hospitals` | Superadmin |
-| Crear / editar / activar / desactivar hospital | `/hospitals/new`, `/hospitals/{id}/edit` | Superadmin |
-| Usuarios y privilegios | `/users`, `/users/new`, `/users/{id}/edit` | Administrador |
-| Aprobar / rechazar cuentas | `/approvals` | Administrador |
-| Áreas / servicios | `/departments` | Administrador |
-| Tickets (listar y filtrar) | `/tickets` | Todos; alcance por rol |
-| Crear ticket | `/tickets/new` | Aprobados |
-| Detalle, conversación y ciclo de vida | `/tickets/{id}` | Autorizados |
-| Inventario de consumibles | `/inventory` | Personal autorizado |
-| Nueva / edición ficha de producto | `/inventory/new`, `/inventory/{id}/edit` | Gestores |
-| Kardex: entrada / salida / ajuste | `/inventory/{id}` | Lectura personal, escritura gestores |
-| Exportar inventario CSV | `/inventory/export/csv` | Gestores |
-| Conteos físicos / conciliaciones | `/counts`, `/counts/{id}` | Personal autorizado |
-| Equipos / activos | `/assets`, `/assets/new`, `/assets/{id}/edit` | Personal autorizado |
-| CRM con oportunidades por etapa | `/crm` | Gestores |
-| Contactos CRM | `/crm/contacts`, `/crm/contacts/new`, `/crm/contacts/{id}/edit` | Gestores |
-| Crear / editar oportunidad | `/crm/opportunities/new`, `/crm/opportunities/{id}/edit` | Gestores |
-| Personalización de portal / módulos | `/settings` | Administrador |
-| Bitácora / auditoría | `/audit` | Administrador |
-| Salud del servicio | `/health` | Público |
-
-## Roles y permisos
-
-- **Superadministrador:** crea, edita y desactiva hospitales; selecciona hospital activo en la barra superior; configura, consulta y administra sus módulos. No se crean más superadministradores desde la interfaz.
-- **Administrador hospital:** administra usuarios de su hospital, aprueba altas y confirma o rechaza tickets; asigna técnicos, opera inventario y CRM y personaliza branding y módulos.
-- **Coordinador:** consulta tickets y coordina asignaciones / estados **tras** confirmación administrativa; administra productos, Kardex, activos, conteos y CRM; no valida solicitudes ni cuentas.
-- **Técnico:** consulta equipos/productos y su stock (no costos ni precios); trabaja únicamente en tickets que le hayan asignado (o que haya solicitado personalmente), comenta y actualiza el estado; no asigna técnicos ni modifica el inventario.
-- **Solicitante:** se registra eligiendo un hospital y un cargo; queda **pendiente** hasta que lo apruebe un admin; crea tickets que deben confirmarse, consulta solo los suyos, comenta y acepta el cierre de los resueltos.
-
-**Aislamiento de datos:** el hospital del usuario procede de la sesión y de la BBDD; no de un campo editable del formulario. Las consultas de los módulos y la validación de referencias (usuarios, activos, productos, oportunidades) incluyen `hospital_id`. Un superadmin puede cambiar el hospital activo, sin mezcla de datos entre sesiones de clientes normales.
-
-## Flujos funcionales
-
-### Solicitudes y mesa de ayuda
-
-1. Solicitante se registra: estado `pending`.
-2. Admin autoriza en `/approvals` → `approved`.
-3. Solicitante crea ticket: estado `pendiente`.
-4. Admin pulsa **Confirmar ticket**: estado `abierto`, guarda `confirmed_by_id` y fecha.
-5. Coordinador asigna técnico; técnico actualiza `en_proceso` → `resuelto`.
-6. Solicitante **acepta solución** → `cerrado`; administración también puede cerrar o reabrir.
-7. Comentarios externos visibles en ticket; **notas internas** solo para personal técnico y administrativo.
-
-### Inventario y equipos
-
-- Los artículos tienen **SKU por hospital, código de barras, nombre, categoría, ubicación, costo bruto, precio de venta, stock, stock mínimo y activo/inactivo**.
-- Precio bruto = **costo bruto de adquisición**, en CLP. El sistema **no calcula IVA**, impuesto de venta, margen ni emisión de facturas; puedes adaptar estas reglas más adelante.
-- Creación: stock inicial registrado como movimiento `inicial`.
-- Edición: la ficha **no** permite modificar stock sin historial.
-- Kardex: entradas, salidas, ajuste de saldo, usuario, fecha, razón y stock final. No permite saldos negativos.
-- Conteos: captura snapshot del stock, entrada de cantidad física por artículo y conciliación con movimientos `conteo`. Si otro movimiento modificó existencias durante el conteo, se bloquea el cierre y debe generarse un conteo nuevo.
-- Equipos/activos registran identificación, serie, localización y categoría y pueden asociarse a tickets.
-- CSV exportable con prevención básica de fórmulas maliciosas.
-
-### CRM y personalización
-
-- CRM: contactos con cargo, área, teléfono y email, oportunidades con responsable, monto, fecha prevista y etapas **Nuevo → Contactado → Propuesta → Negociación → Ganado / Perdido**.
-- Cada hospital define **nombre del portal, color corporativo y activación de tickets, inventario y CRM**. Los módulos se controlan también en el backend: ocultar un enlace no sustituye validar autorización.
-- Skeletons: tarjetas de métricas usan placeholders animados hasta que responde `/api/dashboard`; la navegación de páginas muestra un skeleton mientras se carga el siguiente contenido. La interfaz tiene diseño responsive.
-
-## Estructura del código
-
-```text
-hospitalops/
-├── app/
-│   ├── __init__.py
-│   ├── main.py               # Rutas web, reglas de negocio, permisos, API dashboard
-│   ├── models.py             # Modelos SQLAlchemy
-│   ├── database.py           # Configuración SQLite / PostgreSQL
-│   ├── security.py           # Password hashing PBKDF2
-│   ├── static/
-│   │   ├── styles.css
-│   │   └── app.js
-│   └── templates/            # Vistas Jinja2 HTML server-side
-├── tests/
-│   └── test_app.py
-├── seed.py                   # Datos ficticios para pruebas
-├── requirements.txt
-├── Dockerfile
-├── docker-compose.yml
-├── .env.example
-└── README.md
-```
-
-## Tests
-
-```bash
-pip install -r requirements-dev.txt
-pytest -q
-```
-
-Los tests cubren CSRF, registro/aprobación, ciclo de tickets, privacidad entre hospitales, inventario y conteo, roles y personalización.
-
-## PostgreSQL (sin Docker)
-
-En `.env` configura una instancia propia:
-
-```ini
-DATABASE_URL=postgresql+psycopg://usuario:clave@localhost:5432/hospitalops
-SESSION_SECRET=una-clave-larga-aleatoria-unica
-SESSION_HTTPS_ONLY=true
-```
-
-Para generar una clave segura (PowerShell o terminal):
-
-```bash
 python -c "import secrets; print(secrets.token_urlsafe(48))"
+# Pega el valor en SESSION_SECRET del archivo .env
+python create_admin.py
+python -m uvicorn app.main:app --reload --port 8000
 ```
 
-Crea previamente la base de datos y ejecuta `python -m uvicorn app.main:app --host 0.0.0.0 --port 8000`. **El `create_all()` inicial es apropiado para prototipos**, pero para evolución real de esquemas se recomienda agregar **Alembic** antes de usar datos de producción.
+Visita http://127.0.0.1:8000. Si el asistente de creación de administrador no encuentra tablas, el comando `create_admin.py` invoca `init_db()` automáticamente. `seed.py` es exclusivamente para demostración en **una BD vacía de pruebas** (genera cuentas con contraseña conocida); no usarlo para ningún entorno del cliente.
 
-## Docker Compose
+## Instalación local Docker + PostgreSQL
 
-En un archivo `.env` en la raíz, define **por lo menos** `POSTGRES_PASSWORD` y `SESSION_SECRET` (además de las demás variables deseadas). Luego:
+Crear `.env` con `POSTGRES_PASSWORD` largo, `SESSION_SECRET` aleatorio y `SESSION_HTTPS_ONLY=false` para HTTP local (no usar esos valores en servidor público). Después:
 
 ```bash
 docker compose up --build -d
-# Solo para pruebas, primera ejecución opcional:
-docker compose exec web python seed.py
+docker compose exec web python create_admin.py
 ```
 
-La aplicación estará en `http://localhost:8000`. Para salir: `docker compose down`. Para detener y **eliminar los datos** de PostgreSQL: `docker compose down -v` (destructivo).
+Accede a http://127.0.0.1:8000. PostgreSQL conserva datos en el volumen `postgres_data`. No es un sustituto de un respaldo externo. Para el entorno público se recomienda Railway + PostgreSQL con HTTPS, no publicar Docker Compose directo a internet.
 
-## Seguridad y estado del producto
+## Funcionalidad por perfil
 
-Esta entrega es una **base funcional/MVP**, no un software clínico certificado. No almacena fichas médicas ni resultados de pacientes y no se debe utilizar como historia clínica. Las validaciones incluyen: contraseñas con PBKDF2 salted, cookies de sesión firmadas/HttpOnly, formularios CSRF, autorización por rol, aislamiento por hospital, estado de cuentas, validación de relaciones, bitácora de operaciones y ORM contra SQL injection.
+| Perfil | Alcance |
+|---|---|
+| Superadministrador (`superadmin`) | Todos los hospitales, equipo global, bodega empresa, configuración y auditoría |
+| Coordinador empresa (`coordinador_global`) | Tickets de todos los hospitales, asignaciones y bodega empresa, sin creación de superadmins |
+| Técnico empresa (`tecnico_global`) | Tickets que tiene asignados en **cualquier hospital** y su propia dotación de repuestos |
+| Administrador hospital (`admin_cliente`) | Usuarios, aprobaciones, tickets, inventario y módulos de **su hospital** |
+| Coordinador hospital (`coordinador`) | Operaciones y asignaciones de su hospital |
+| Técnico hospital (`tecnico`) | Tickets asignados dentro de su hospital, accesos de inventario limitados |
+| Solicitante (`solicitante`) | Crea tickets, revisa **solo los suyos**, comenta y acepta resolución |
 
-Antes de instalar en hospitales reales: **HTTPS + proxy inverso, rate limiting y bloqueo de intentos de login, 2FA/SSO institucional, política de contraseñas, correos de invitación y restablecimiento, respaldos probados, recuperación, logs externos, monitoreo, permisos por departamento, auditoría de cambios más exhaustiva, paginación de tablas, pruebas E2E y de penetración, migraciones con Alembic y evaluación de requisitos legales aplicables (incluida la normativa chilena de protección de datos).** La configuración demo y su contraseña deben eliminarse antes de producción.
+Las cuentas globales se crean únicamente desde `/equipo` por el superadministrador y no tienen `hospital_id` asociado. Los administradores hospitalarios no pueden asignar roles globales.
 
-El módulo de inventario no integra lector físico dedicado, compras ERP ni facturación; un escáner USB que escriba el código como teclado puede usarse con el campo de código de barras. El sistema no envía email ni notificaciones externas por defecto.
+## Vistas principales
 
-## Solución de problemas
+| Ruta | Función |
+|---|---|
+| `/login`, `/perfil` | Acceso y cambio de contraseña |
+| `/hospitals` | Altas/bajas/edición de clientes |
+| `/operaciones/tickets` | Centro multihospital con filtros y paginación de 50 tickets |
+| `/equipo` | Alta/desactivación del personal de la empresa |
+| `/mis-tickets` | Tickets multihospital asignados a cada técnico global |
+| `/bodega` | Bodega central, costos, precios, stock y movimientos |
+| `/bodega/export/csv` | Descarga del stock de empresa |
+| `/mis-repuestos` | Consumo de repuestos asociado a ticket por técnico |
+| `/dashboard` | Resumen de hospital activo y métricas diferidas |
+| `/tickets`, `/tickets/new`, `/tickets/{id}` | Solicitudes, aprobación administrativa, asignación, seguimiento, cierre |
+| `/users`, `/approvals`, `/departments` | Cuentas, aprobaciones, áreas y cargos |
+| `/inventory`, `/counts`, `/assets` | Inventario por hospital, Kardex, conteos físicos, equipos |
+| `/crm`, `/crm/contacts`, `/crm/opportunities/new` | Pipeline, contactos y oportunidades |
+| `/settings`, `/audit` | Personalización y registro de actividad |
+| `/health`, `/ready` | Estado de proceso y disponibilidad real de BD |
 
-- **`No module named fastapi`**: activa el entorno virtual y ejecuta `pip install -r requirements.txt`.
-- **Puerto ocupado**: usa `--port 8001`.
-- **Base SQLite reiniciada**: verifica que ejecutas desde la raíz del proyecto; `DATABASE_URL=sqlite:///./hospitalops.db` es relativo al directorio actual.
-- **Sesión/cookie inválida**: borra la cookie local después de cambiar `SESSION_SECRET`.
-- **CSRF inválido**: recarga la página y vuelve a enviar el formulario.
-- **No aparece CRM/inventario**: revisa el rol del usuario y las opciones de `/settings`.
-- **No existe hospital**: crea el primer hospital con un superadministrador. El seed demo inicial es lo más sencillo para la primera puesta en marcha.
+Hay más vistas y formularios específicos en `app/templates/`.
 
-## Puesta en marcha sin datos ficticios
+## Flujos comerciales
 
-Si no deseas cargar el seed de prueba, no ejecutes `python seed.py`. En una base vacía ejecuta:
+1. Crear hospitales desde `/hospitals`; configurar su marca en `/settings` desde la cuenta que corresponda.
+2. Crear administradores de cada hospital desde `/users`, con el hospital seleccionado.
+3. Crear coordinadores y técnicos **de la empresa** desde `/equipo` (rol global).
+4. El solicitante crea un ticket; el administrador hospitalario lo confirma; el coordinador de empresa lo asigna desde la bandeja de operaciones; el técnico lo gestiona en `/mis-tickets`; el solicitante valida la solución.
+5. Registrar repuestos propios de la empresa en `/bodega`, entregarlos a técnicos, registrar consumo desde `/mis-repuestos` indicando ticket y recuperar repuestos con devoluciones.
+6. Para inventario **del hospital**, usar `/inventory` y `/counts`: es diferente de la bodega de la empresa.
+
+## Seguridad implementada
+
+- Contraseñas PBKDF2-HMAC-SHA256 con salt único; sesión HTTP-only firmada con secreto; modo `Secure` obligatorio en producción.
+- Tokens CSRF para formularios; encabezados CSP, anti-iframe, nosniff y HSTS en producción.
+- Limitación de intentos fallidos persistida en BD (8 por cuenta/15 minutos, más umbral global de IP); el proveedor cloud debe añadir WAF/rate limiting de borde según carga.
+- Revocación de sesiones cuando se cambia o restablece una contraseña; bloqueo inmediato al desactivar usuarios u hospitales.
+- Acceso del técnico global **solo por asignación**, usuarios hospitalarios con aislamiento por `hospital_id`, y inventario de empresa solo visible para personal proveedor autorizado.
+- Registro público deshabilitado por defecto en producción. Los usuarios se dan de alta desde el panel.
+- No se guarda información clínica, diagnóstico ni historia médica en el sistema por diseño. La empresa debe instruir a solicitantes a no ingresar datos sensibles en campos libres.
+- No se ejecuta `seed.py` en producción; nunca publicar contraseñas demo.
+
+**Controles pendientes de validación externa**: MFA/SSO, pruebas de penetración, pruebas de carga real, backup y restauración, plan de incidentes, alta disponibilidad, monitoreo 24/7 y evaluación legal del tratamiento de datos en Chile. Se exige como condición contractual si el cliente lo necesita.
+
+## Producción en Railway (orden exacto)
+
+1. Crear un repositorio **privado** GitHub con todos los archivos de `hospitalops` en la raíz y enviar a `main`. No subir `.env`, archivos `.db` o respaldos.
+2. Crear proyecto en Railway. Añadir base `Postgres` desde `+ New`.
+3. Añadir servicio `GitHub Repo` conectado al repositorio. Railway detecta `Dockerfile` y `railway.json`. `railway.json` usa `/ready` como healthcheck.
+4. En `web → Variables`, registrar:
+
+```text
+APP_ENV=production
+DATABASE_URL=${{Postgres.DATABASE_URL}}
+SESSION_SECRET=<salida de python -c "import secrets; print(secrets.token_urlsafe(48))">
+SESSION_HTTPS_ONLY=true
+ALLOW_SELF_REGISTRATION=false
+ALLOWED_HOSTS=<dominio.up.railway.app de tu servicio>
+```
+
+Si aún no se puede obtener el nombre del dominio al configurar variables, crear primero un dominio Railway en `Networking`; o usar **temporalmente** `ALLOWED_HOSTS=*.up.railway.app`, cambiándolo luego por el dominio exacto. Si el servicio PostgreSQL tiene otro nombre, cambiar `Postgres` en la referencia por el nombre real. No copiar secretos en GitHub ni capturas.
+5. Crear/validar el dominio Railway, HTTPS y logs. El entorno se niega a iniciar si falta secreto, PostgreSQL, HTTPS seguro o `ALLOWED_HOSTS`.
+6. En consola del servicio web (`railway ssh -s NOMBRE_SERVICIO` tras instalar y vincular CLI), ejecutar `python create_admin.py` **una sola vez**.
+7. Comprobar `/ready`, acceder por HTTPS, crear un hospital y ejecutar el recorrido de aceptación en `ENTREGA_Y_ACEPTACION.md`.
+8. Contratar/habilitar respaldos nativos **y una copia externa independiente**. Probar restauración trimestral; añadir monitoreo externo de uptime, alertas y límites de gasto.
+9. Activar dominio propio del cliente y cambiar `ALLOWED_HOSTS` para incluirlo, quitar patrones temporales.
+
+Railway es un servicio externo. El equipo que opere el sistema debe confirmar el precio y la configuración actual del proveedor. `Dockerfile` utiliza usuario sin privilegios y escucha el puerto `$PORT` asignado.
+
+## Pruebas
 
 ```bash
-python create_admin.py
-python -m uvicorn app.main:app --reload
+pip install -r requirements-dev.txt
+python -m pytest -q
 ```
 
-El asistente `create_admin.py` pide nombre, correo y contraseña segura para el superadministrador. Inicia sesión con esa cuenta, crea el primer hospital en **Clientes**, selecciona ese hospital e incorpora usuarios desde el panel.
+Las pruebas cubren aislamiento entre instituciones, aprobación de usuarios y tickets, movimientos de stock, gestión CRM, equipo global, inventario central, permisos del personal multihospital, contraseñas y bloqueos de login.
 
-Consulta [ERD.md](ERD.md) y [schema.sql](schema.sql) para explorar el modelo de datos. La pantalla Inventario permite capturar códigos de barras con el navegador cuando la API `BarcodeDetector` y los permisos HTTPS/cámara están disponibles; si no lo están, admite entrada manual o lector USB tipo teclado.
+### Base de datos y evolución
 
-## Capturas de la interfaz
+`app/database.py` configura SQLite en desarrollo y PostgreSQL en producción. `Base.metadata.create_all` solo crea tablas faltantes; **no modifica columnas existentes ni reemplaza una estrategia de migraciones versionadas**. Para una instalación nueva sobre PostgreSQL limpio es suficiente para el esquema incluido. Para evolucionar una BD existente: sacar backup, comparar esquema, preparar y revisar una migración SQL/Alembic en staging antes del despliegue. `schema.sql` es una referencia del esquema inicial y no un mecanismo de actualización automática.
 
-El directorio `previews/` incluye capturas de referencia (login, dashboard, tickets, inventario, CRM y adaptación móvil). Son vistas generadas desde los templates reales con datos ficticios, para inspeccionar el diseño antes de instalar.
+### Consideraciones contractuales
+
+La entrega del ZIP por sí sola no transfiere propiedad intelectual, dominio, credenciales de Railway ni derechos exclusivos: deben definirse por contrato. El cliente debe aceptar el alcance de módulos, procedimiento de respaldo, SLA y roles de responsabilidad. Ver `ENTREGA_Y_ACEPTACION.md`.

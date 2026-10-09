@@ -1,0 +1,9 @@
+{% extends 'base.html' %}{% block title %}Operaciones multihospital{% endblock %}{% block content %}
+<div class="page-heading"><div><h1>Tickets de todos los hospitales</h1><p>Bandeja central de la empresa · {{ total }} tickets</p></div></div>
+<section class="panel"><form method="get" class="filterbar"><select name="hospital_id"><option value="">Todos los hospitales</option>{% for h in clients %}<option value="{{ h.id }}" {% if chosen_hospital == h.id|string %}selected{% endif %}>{{ h.name }}</option>{% endfor %}</select>
+<select name="status"><option value="">Todos los estados</option>{% for st in ticket_statuses %}<option value="{{ st }}" {% if st == status %}selected{% endif %}>{{ st|replace('_',' ') }}</option>{% endfor %}</select><button class="btn btn-secondary">Filtrar</button></form>
+<div class="table-responsive"><table><thead><tr><th>Ticket</th><th>Hospital</th><th>Responsable</th><th>Estado</th><th>Abrir</th></tr></thead><tbody>
+{% for t in items %}<tr><td>#{{ t.id }} · {{ t.title }}</td><td>{{ t.hospital.name }}</td><td>{{ t.assignee.name if t.assignee else 'Sin asignar' }}</td><td>{{ t.status }}</td>
+<td><form method="post" action="/operaciones/abrir/{{ t.id }}"><input type="hidden" name="_csrf" value="{{ csrf_token }}"><button class="btn btn-secondary btn-small">Gestionar</button></form></td></tr>{% else %}<tr><td colspan="5">Sin tickets</td></tr>{% endfor %}</tbody></table></div>
+<div style="padding:12px">{% if page > 1 %}<a href="?page={{ page-1 }}&hospital_id={{ chosen_hospital }}&status={{ status }}">← Anterior</a>{% endif %} Página {{ page }} / {{ ((total-1)//50+1) if total else 1 }} {% if page*50 < total %}<a href="?page={{ page+1 }}&hospital_id={{ chosen_hospital }}&status={{ status }}">Siguiente →</a>{% endif %}</div>
+</section>{% endblock %}
