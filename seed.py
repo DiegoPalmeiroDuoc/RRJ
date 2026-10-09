@@ -103,11 +103,16 @@ def seed_data(db):
 
 
 if __name__ == '__main__':
+    import sys
+    from seed_demo import seed_demo
     init_db()
     with SessionLocal() as db:
         created = seed_data(db)
+        # Demo extendida por defecto; `python seed.py --minimo` carga solo el seed base de las pruebas
+        if created and '--minimo' not in sys.argv:
+            seed_demo(db)
     print('Datos demo creados.' if created else 'Base de datos no vacía; se conservan los datos existentes.')
     if created:
-        print('Superadmin: root@hospitalops.example | DemoSeguro2026!')
-        print('Admin Norte: admin@norte.example | DemoSeguro2026!')
-        print('Admin Sur: admin@sur.example | DemoSeguro2026!')
+        print('Contraseña de todas las cuentas: DemoSeguro2026!')
+        print('Superadmin: root@hospitalops.example | Admin Norte: admin@norte.example')
+        print('Listado completo de usuarios por rol en CREDENCIALES_DEMO.md')

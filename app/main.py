@@ -868,6 +868,8 @@ def ticket_visible(user, ticket):
 @app.get('/tickets', response_class=HTMLResponse)
 def tickets(request: Request, db: Session = Depends(get_db)):
     user, hospital = require(request, db, module='tickets')
+    if user.role == 'tecnico_global':
+        return redirect('/mis-tickets')
     query = select(Ticket).where(Ticket.hospital_id == hospital.id)
     if user.role == 'solicitante':
         query = query.where(Ticket.requester_id == user.id)

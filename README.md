@@ -22,6 +22,17 @@ python -m uvicorn app.main:app --reload --port 8000
 
 Visita http://127.0.0.1:8000. Si el asistente de creación de administrador no encuentra tablas, el comando `create_admin.py` invoca `init_db()` automáticamente. `seed.py` es exclusivamente para demostración en **una BD vacía de pruebas** (genera cuentas con contraseña conocida); no usarlo para ningún entorno del cliente.
 
+## Demo con datos ficticios
+
+Para presentaciones o pruebas locales, con la base vacía:
+
+```powershell
+python seed.py
+python -m uvicorn app.main:app --reload --port 8000
+```
+
+Carga 3 hospitales, 88 usuarios de todos los perfiles, 26 tickets, inventario, bodega de empresa y CRM. Todas las cuentas usan la contraseña `DemoSeguro2026!`. **El listado completo de usuarios y el flujo sugerido están en [CREDENCIALES_DEMO.md](CREDENCIALES_DEMO.md).**
+
 ## Instalación local Docker + PostgreSQL
 
 Crear `.env` con `POSTGRES_PASSWORD` largo, `SESSION_SECRET` aleatorio y `SESSION_HTTPS_ONLY=false` para HTTP local (no usar esos valores en servidor público). Después:
