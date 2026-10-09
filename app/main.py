@@ -1,5 +1,4 @@
 """HospitalOps web application. Server-rendered views + JSON dashboard endpoint."""
-import csv
 import io
 import os
 import re
@@ -16,6 +15,9 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill
+from openpyxl.utils import get_column_letter
 from sqlalchemy import func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -98,6 +100,44 @@ STAGES = ['nuevo', 'contactado', 'propuesta', 'negociacion', 'ganado', 'perdido'
 
 def redirect(path='/dashboard'):
     return RedirectResponse(path, status_code=303)
+
+
+XLSX_MEDIA_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+
+
+def xlsx_response(filename: str, sheet_title: str, headers: list[str], rows, money_columns=()):
+    """Excel download. Text is always stored as text, so values like '=HYPERLINK(...)' never run as formulas."""
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = sheet_title
+    sheet.append(headers)
+    for cell in sheet[1]:
+        cell.font = Font(bold=True, color='FFFFFF')
+        cell.fill = PatternFill('solid', fgColor='1F4E79')
+    for row in rows:
+        values = []
+        for value in row:
+            if isinstance(value, Decimal):
+                value = float(value)
+            elif isinstance(value, bool):
+                value = 'Sí' if value else 'No'
+            values.append('' if value is None else value)
+        sheet.append(values)
+        for cell in sheet[sheet.max_row]:
+            if isinstance(cell.value, str):
+                cell.data_type = 's'
+    for index in money_columns:
+        for (cell,) in sheet.iter_rows(min_row=2, min_col=index, max_col=index):
+            cell.number_format = '#,##0.00'
+    for index, column in enumerate(sheet.columns, start=1):
+        width = max(len(str(cell.value)) for cell in column if cell.value is not None)
+        sheet.column_dimensions[get_column_letter(index)].width = min(max(width + 2, 10), 50)
+    sheet.freeze_panes = 'A2'
+    sheet.auto_filter.ref = sheet.dimensions
+    output = io.BytesIO()
+    workbook.save(output)
+    return StreamingResponse(iter([output.getvalue()]), media_type=XLSX_MEDIA_TYPE,
+                             headers={'Content-Disposition': f'attachment; filename="{filename}"'})
 
 
 def flash(request: Request, message: str, level: str = 'success'):
@@ -1101,22 +1141,17 @@ async def inventory_move(id: int, request: Request, db: Session = Depends(get_db
     return redirect(f'/inventory/{id}')
 
 
-@app.get('/inventory/export/csv')
+@app.get('/inventory/export/xlsx')
 def inventory_export(request: Request, db: Session = Depends(get_db)):
     user, hospital = require(request, db, MANAGERS, 'inventory')
-    items = db.scalars(select(InventoryItem).where(InventoryItem.hospital_id == hospital.id)).all()
-    out = io.StringIO()
-    writer = csv.writer(out)
-    writer.writerow(['SKU', 'Código barras', 'Producto', 'Categoría', 'Ubicación',
-                     'Precio bruto', 'Precio venta', 'Stock', 'Stock mínimo', 'Activo'])
-    def csv_safe(value):
-        string = str(value if value is not None else '')
-        return "'" + string if string.startswith(('=', '+', '-', '@', '\t', '\r')) else string
-    for i in items:
-        writer.writerow([csv_safe(field) for field in [i.sku, i.barcode, i.name, i.category,
-                        i.location, i.gross_cost, i.sale_price, i.stock, i.min_stock, i.active]])
-    return StreamingResponse(iter([out.getvalue().encode('utf-8-sig')]), media_type='text/csv',
-                             headers={'Content-Disposition': 'attachment; filename="inventario.csv"'})
+    items = db.scalars(select(InventoryItem).where(InventoryItem.hospital_id == hospital.id)
+                       .order_by(InventoryItem.sku)).all()
+    return xlsx_response('inventario.xlsx', 'Inventario',
+        ['SKU', 'Código barras', 'Producto', 'Categoría', 'Ubicación',
+         'Precio bruto', 'Precio venta', 'Stock', 'Stock mínimo', 'Activo'],
+        [(i.sku, i.barcode, i.name, i.category, i.location, i.gross_cost, i.sale_price,
+          i.stock, i.min_stock, i.active) for i in items],
+        money_columns=(6, 7))
 
 
 @app.get('/counts', response_class=HTMLResponse)
@@ -1582,18 +1617,12 @@ async def provider_consume_stock(id: int, request: Request, db: Session = Depend
     return redirect('/mis-repuestos')
 
 
-@app.get('/bodega/export/csv')
+@app.get('/bodega/export/xlsx')
 def provider_warehouse_export(request: Request, db: Session = Depends(get_db)):
     require(request, db, PROVIDER_MANAGERS, allow_no_hospital=True)
     items = db.scalars(select(ProviderItem).order_by(ProviderItem.sku)).all()
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow(['SKU','Producto','Categoría','Ubicación','Costo bruto','Precio venta','Stock bodega','Stock mínimo'])
-    def escape_csv(value):
-        text_value = str(value if value is not None else '')
-        return "'" + text_value if text_value.startswith(('=', '+', '-', '@', '\t', '\r')) else text_value
-    for item in items:
-        writer.writerow([escape_csv(v) for v in (item.sku,item.name,item.category,item.location,
-            item.gross_cost,item.sale_price,item.stock,item.min_stock)])
-    return StreamingResponse(iter([output.getvalue().encode('utf-8-sig')]), media_type='text/csv',
-                             headers={'Content-Disposition':'attachment; filename="bodega_empresa.csv"'})
+    return xlsx_response('bodega_empresa.xlsx', 'Bodega',
+        ['SKU','Producto','Categoría','Ubicación','Costo bruto','Precio venta','Stock bodega','Stock mínimo'],
+        [(item.sku,item.name,item.category,item.location,item.gross_cost,item.sale_price,
+          item.stock,item.min_stock) for item in items],
+        money_columns=(5, 6))

@@ -1,3 +1,4 @@
+import io
 import os
 import re
 from pathlib import Path
@@ -5,6 +6,7 @@ import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from fastapi.testclient import TestClient
+from openpyxl import load_workbook
 from app import database, main
 from app.models import Base, Hospital, InventoryItem, Ticket, User, StockCount
 from seed import seed_data
@@ -145,7 +147,7 @@ def test_ticket_confirmation_assignment_completion(sandbox):
         assert ticket.status == 'cerrado' and ticket.confirmed_by_id is not None
 
 
-def test_inventory_movement_count_and_csv(sandbox):
+def test_inventory_movement_count_and_xlsx(sandbox):
     client, Session = sandbox
     signin(client, 'coordinador@norte.example')
     assert form_post(client, '/inventory/1/move', {
@@ -154,8 +156,11 @@ def test_inventory_movement_count_and_csv(sandbox):
         assert db.get(InventoryItem, 1).stock == 38
     assert form_post(client, '/inventory/1/move', {'kind':'salida','amount':'9999',
                                                     'note':'No permitido'}).status_code == 409
-    export = client.get('/inventory/export/csv')
-    assert export.status_code == 200 and 'INS-GUA-001' in export.text
+    export = client.get('/inventory/export/xlsx')
+    assert export.status_code == 200 and export.headers['content-type'] == main.XLSX_MEDIA_TYPE
+    sheet = load_workbook(io.BytesIO(export.content)).active
+    assert sheet['A1'].value == 'SKU'
+    assert 'INS-GUA-001' in [row[0] for row in sheet.iter_rows(min_row=2, values_only=True)]
     create = form_post(client, '/counts/new', {'note':'Inventario semestral'})
     assert create.status_code == 303
     count_id = int(create.headers['location'].split('/')[-1])

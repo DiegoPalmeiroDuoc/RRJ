@@ -1,6 +1,6 @@
 {% extends 'base.html' %}{% block title %}Bodega central{% endblock %}{% block content %}
 <div class="page-heading"><div><h1>Bodega central</h1><p>Propiedad de la empresa de soporte · existencias y repuestos asignados</p></div></div>
-<div class="page-heading"><a href="/bodega/export/csv" class="btn btn-secondary">Exportar bodega CSV</a></div>
+<div class="page-heading"><a href="/bodega/export/xlsx" class="btn btn-secondary" data-no-skeleton>↓ Exportar bodega Excel</a></div>
 <section class="panel form-panel"><div class="panel-header"><h2>Nuevo producto</h2></div><form method="post" action="/bodega/crear" class="form-stack"><input type="hidden" name="_csrf" value="{{ csrf_token }}">
 <label>SKU<input name="sku" required></label><label>Producto<input name="name" required></label>
 <label>Categoría<input name="category" value="Repuesto"></label><label>Ubicación<input name="location" value="Bodega central"></label>

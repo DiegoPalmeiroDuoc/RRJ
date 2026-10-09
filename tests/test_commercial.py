@@ -1,4 +1,6 @@
 """Acceptance/security regression tests for the service-provider edition."""
+import io
+from openpyxl import load_workbook
 from sqlalchemy import select
 from app.models import User, Ticket, ProviderItem, TechnicianStock, ProviderMovement, Hospital
 from test_app import sandbox, signin, token, form_post
@@ -186,17 +188,20 @@ def test_password_change_revokes_existing_browser_sessions(sandbox):
         assert other.get('/equipo').status_code == 303
 
 
-def test_warehouse_csv_export_and_extra_isolation(sandbox):
+def test_warehouse_xlsx_export_and_extra_isolation(sandbox):
     client, _ = sandbox
     signin(client, 'root@hospitalops.example')
     assert form_post(client, '/bodega/crear', {'sku':'SNEAK-01','name':'=HYPERLINK("x")',
         'stock':'1','gross_cost':'11','sale_price':'20'}).status_code == 303
-    response = client.get('/bodega/export/csv')
-    assert response.status_code == 200 and 'SNEAK-01' in response.text
-    assert "'=HYPERLINK" in response.text
+    response = client.get('/bodega/export/xlsx')
+    assert response.status_code == 200
+    rows = {row[0].value: row for row in load_workbook(io.BytesIO(response.content)).active.iter_rows(min_row=2)}
+    name_cell = rows['SNEAK-01'][1]
+    # El texto se guarda como texto literal, nunca como fórmula ejecutable
+    assert name_cell.value == '=HYPERLINK("x")' and name_cell.data_type == 's'
     client.cookies.clear()
     signin(client, 'admin@norte.example')
-    assert client.get('/bodega/export/csv').status_code == 403
+    assert client.get('/bodega/export/xlsx').status_code == 403
     assert client.get('/operaciones/tickets').status_code == 403
 
 

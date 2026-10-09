@@ -57,7 +57,7 @@ Las cuentas globales se crean únicamente desde `/equipo` por el superadministra
 | `/equipo` | Alta/desactivación del personal de la empresa |
 | `/mis-tickets` | Tickets multihospital asignados a cada técnico global |
 | `/bodega` | Bodega central, costos, precios, stock y movimientos |
-| `/bodega/export/csv` | Descarga del stock de empresa |
+| `/bodega/export/xlsx` | Descarga del stock de empresa (Excel) |
 | `/mis-repuestos` | Consumo de repuestos asociado a ticket por técnico |
 | `/dashboard` | Resumen de hospital activo y métricas diferidas |
 | `/tickets`, `/tickets/new`, `/tickets/{id}` | Solicitudes, aprobación administrativa, asignación, seguimiento, cierre |

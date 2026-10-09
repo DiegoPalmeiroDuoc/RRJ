@@ -20,7 +20,7 @@
 - [ ] La empresa registra repuesto central con costo bruto, precio venta, SKU, stock y mínimo.
 - [ ] Se entrega stock de bodega a un técnico; el técnico descuenta unidades en un ticket asignado; se procesa devolución.
 - [ ] El Kardex almacena autor, cantidad, tipo, ticket y hospital cuando aplica.
-- [ ] El inventario de hospital acepta entradas/salidas, conteos físicos y exportación CSV.
+- [ ] El inventario de hospital acepta entradas/salidas, conteos físicos y exportación a Excel.
 - [ ] Los estados deshabilitados impiden acceso; la contraseña cambiada revoca sesiones previas.
 - [ ] Se comprueba HTTPS con cookies seguras y protección CSRF, sin claves demo.
 - [ ] Se prueba **restauración real** de PostgreSQL sobre staging con copia externa.
