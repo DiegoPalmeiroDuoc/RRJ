@@ -1,0 +1,19 @@
+{% extends 'base.html' %}{% block title %}Auditoría empresa{% endblock %}{% block content %}
+<div class="page-heading"><div><div class="eyebrow">SEGURIDAD Y TRAZABILIDAD</div><h1>Auditoría de la empresa</h1><p>Bodega central, entregas a técnicos y equipo de la empresa. Puedes incluir también la actividad de los hospitales.</p></div><div class="heading-actions"><a class="btn btn-secondary" href="/auditoria-empresa/export/xlsx{% if query_string %}?{{ query_string }}{% endif %}" data-no-skeleton>↓ Exportar Excel</a></div></div>
+<section class="panel">
+<form method="get" class="filterbar">
+<select name="alcance" aria-label="Alcance"><option value="empresa" {% if filters.alcance == 'empresa' %}selected{% endif %}>Solo empresa</option><option value="todos" {% if filters.alcance == 'todos' %}selected{% endif %}>Empresa y todos los hospitales</option>{% for h in clients %}<option value="{{ h.id }}" {% if filters.alcance == h.id|string %}selected{% endif %}>{{ h.name }}</option>{% endfor %}</select>
+<select name="accion" aria-label="Acción"><option value="">Todas las acciones</option>{% for a in actions %}<option value="{{ a }}" {% if filters.accion == a %}selected{% endif %}>{{ a }}</option>{% endfor %}</select>
+<select name="entidad" aria-label="Tipo de registro"><option value="">Todos los registros</option>{% for e in entities %}<option value="{{ e }}" {% if filters.entidad == e %}selected{% endif %}>{{ e }}</option>{% endfor %}</select>
+<select name="actor" aria-label="Persona"><option value="">Todas las personas</option>{% for a in actors %}<option value="{{ a.id }}" {% if filters.actor == a.id|string %}selected{% endif %}>{{ a.name }}</option>{% endfor %}</select>
+<label>Desde<input type="date" name="desde" value="{{ filters.desde }}"></label>
+<label>Hasta<input type="date" name="hasta" value="{{ filters.hasta }}"></label>
+<button class="btn btn-secondary">Filtrar</button>{% if query_string %}<a class="btn btn-ghost" href="/auditoria-empresa">Limpiar</a>{% endif %}
+</form>
+<div class="panel-header"><h2>Eventos <span class="count-chip">{{ total }}</span></h2></div>
+<div class="table-responsive"><table><thead><tr><th>Fecha y hora</th><th>Ámbito</th><th>Actor</th><th>Acción</th><th>Entidad</th><th>Detalle</th></tr></thead><tbody>
+{% for e in items %}<tr><td>{{ e.created_at|fecha('%d/%m/%Y %H:%M') }}</td><td>{% if e.hospital_id %}{% for h in clients if h.id == e.hospital_id %}{{ h.name }}{% endfor %}{% else %}<span class="pill pill-neutral">Empresa</span>{% endif %}</td><td><span class="table-primary">{{ e.actor.name }}</span><span class="table-secondary">{{ roles[e.actor.role] }}</span></td><td><span class="pill pill-neutral">{{ e.action }}</span></td><td>{{ e.entity }} #{{ e.entity_id or '—' }}</td><td>{{ e.detail }}</td></tr>
+{% else %}<tr><td colspan="6" class="empty">No hay eventos con estos filtros.</td></tr>{% endfor %}
+</tbody></table></div>
+<div class="pagination" style="padding:12px">{% if page > 1 %}<a href="?page={{ page - 1 }}{% if query_string %}&{{ query_string }}{% endif %}">← Anterior</a>{% endif %} Página {{ page }} / {{ pages }} {% if page < pages %}<a href="?page={{ page + 1 }}{% if query_string %}&{{ query_string }}{% endif %}">Siguiente →</a>{% endif %}</div>
+</section>{% endblock %}

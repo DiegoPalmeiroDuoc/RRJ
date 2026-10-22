@@ -4,11 +4,13 @@ import os
 import re
 import secrets
 import hashlib
-from datetime import timedelta
+from datetime import timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any
+from urllib.parse import urlencode
+from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -79,6 +81,26 @@ async def secure_headers(request: Request, call_next):
 
 app.mount('/static', StaticFiles(directory=os.path.join(BASE, 'static')), name='static')
 templates = Jinja2Templates(directory=os.path.join(BASE, 'templates'))
+
+# Las fechas se guardan en UTC (sin zona) y se muestran en la hora local de la operación.
+# ZoneInfo aplica automáticamente el horario de verano/invierno de Chile.
+APP_TIMEZONE = ZoneInfo(os.environ.get('APP_TIMEZONE', 'America/Santiago'))
+
+
+def to_local(value: datetime | None) -> datetime | None:
+    return value.replace(tzinfo=timezone.utc).astimezone(APP_TIMEZONE) if value else None
+
+
+def local_date_to_utc(day: datetime) -> datetime:
+    """Medianoche local de `day` expresada en UTC sin zona, para filtrar contra columnas guardadas en UTC."""
+    return day.replace(tzinfo=APP_TIMEZONE).astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def format_local(value: datetime | None, fmt: str = '%d/%m/%Y %H:%M') -> str:
+    return to_local(value).strftime(fmt) if value else ''
+
+
+templates.env.filters['fecha'] = format_local
 
 ROLES = {
     'superadmin': 'Administrador de plataforma',
@@ -407,8 +429,14 @@ async def login(request: Request, db: Session = Depends(get_db)):
 
 
 @app.post('/logout')
-async def logout(request: Request):
+async def logout(request: Request, db: Session = Depends(get_db)):
     await form_data(request)
+    # La cookie de sesión es firmada (no se guarda en el servidor): para que una copia
+    # de la cookie deje de servir tras salir, se invalida el epoch de sesión del usuario.
+    security = db.get(SessionEpoch, request.session.get('uid')) if request.session.get('uid') else None
+    if security is not None and request.session.get('epoch') == security.epoch:
+        security.epoch += 1
+        db.commit()
     request.session.clear()
     return redirect('/login')
 
@@ -639,8 +667,16 @@ def users_new(request: Request, db: Session = Depends(get_db)):
 def user_edit(id: int, request: Request, db: Session = Depends(get_db)):
     user, hospital = require(request, db, ADMINS)
     item = scoped(db, User, id, hospital)
+    ensure_can_manage(user, item)
     deps = db.scalars(select(Department).where(Department.hospital_id == hospital.id)).all()
     return template(request, db, 'user_form.html', item=item, deps=deps)
+
+
+def ensure_can_manage(current: User, item: User):
+    """Un admin de hospital no administra a otros admins (evita que uno tome la cuenta de otro).
+    Solo el superadmin puede editar, cambiar la clave o desactivar a un administrador hospitalario."""
+    if current.role == 'admin_cliente' and item.role == 'admin_cliente' and item.id != current.id:
+        raise HTTPException(403, 'Solo el administrador de plataforma puede modificar a otro administrador')
 
 
 def update_user(item, data, hospital, db, current, is_new=False):
@@ -672,7 +708,10 @@ def update_user(item, data, hospital, db, current, is_new=False):
                 security.epoch += 1
     if not item.name or not re.fullmatch(r'[^@\s]+@[^@\s]+\.[^@\s]+', item.email):
         raise HTTPException(400, 'Nombre y correo válido son obligatorios')
-    item.approval = 'approved'
+    # Las cuentas creadas por un admin nacen aprobadas; al editar se respeta la decisión
+    # tomada en Aprobaciones (pendiente / rechazada no se aprueban por guardar el formulario).
+    if is_new:
+        item.approval = 'approved'
 
 
 @app.post('/users/new')
@@ -693,6 +732,7 @@ async def users_create(request: Request, db: Session = Depends(get_db)):
 async def users_update(id: int, request: Request, db: Session = Depends(get_db)):
     user, hospital = require(request, db, ADMINS)
     item = scoped(db, User, id, hospital)
+    ensure_can_manage(user, item)
     data = await form_data(request)
     update_user(item, data, hospital, db, user)
     log(db, user, hospital.id, 'editar', 'usuario', item.id, item.name)
@@ -708,6 +748,7 @@ async def users_toggle(id: int, request: Request, db: Session = Depends(get_db))
     item = scoped(db, User, id, hospital)
     if item.id == user.id:
         raise HTTPException(403, 'No puedes desactivar tu propia cuenta')
+    ensure_can_manage(user, item)
     item.active = not item.active
     log(db, user, hospital.id, 'activar' if item.active else 'desactivar', 'usuario', id, item.name)
     db.commit()
@@ -1375,6 +1416,84 @@ def audit(request: Request, db: Session = Depends(get_db)):
     items = db.scalars(select(AuditLog).where(AuditLog.hospital_id == hospital.id)
                        .order_by(AuditLog.created_at.desc()).limit(300)).all()
     return template(request, db, 'audit.html', items=items)
+
+
+AUDIT_PAGE_SIZE = 50
+AUDIT_EXPORT_LIMIT = 20000
+
+
+def company_audit_filters(request: Request, db: Session):
+    """Filtros de la auditoría de empresa leídos desde la URL. Valores inválidos se ignoran."""
+    params = request.query_params
+    scope = params.get('alcance', 'empresa')
+    hospital = None
+    if scope.isdigit():
+        hospital = db.get(Hospital, int(scope))
+        scope = str(hospital.id) if hospital else 'empresa'
+    elif scope != 'todos':
+        scope = 'empresa'
+    query = select(AuditLog)
+    if scope == 'empresa':
+        query = query.where(AuditLog.hospital_id.is_(None))
+    elif hospital:
+        query = query.where(AuditLog.hospital_id == hospital.id)
+    action, entity = params.get('accion', '')[:40], params.get('entidad', '')[:40]
+    if action:
+        query = query.where(AuditLog.action == action)
+    if entity:
+        query = query.where(AuditLog.entity == entity)
+    actor_id = params.get('actor', '')
+    if actor_id.isdigit():
+        query = query.where(AuditLog.actor_id == int(actor_id))
+    dates = {}
+    for key in ('desde', 'hasta'):
+        try:
+            dates[key] = datetime.strptime(params.get(key, ''), '%Y-%m-%d')
+        except ValueError:
+            dates[key] = None
+    # Las fechas del filtro son días de calendario en hora local
+    if dates['desde']:
+        query = query.where(AuditLog.created_at >= local_date_to_utc(dates['desde']))
+    if dates['hasta']:
+        query = query.where(AuditLog.created_at < local_date_to_utc(dates['hasta'] + timedelta(days=1)))
+    filters = {'alcance': scope, 'accion': action, 'entidad': entity, 'actor': actor_id if actor_id.isdigit() else '',
+               'desde': params.get('desde', '') if dates['desde'] else '', 'hasta': params.get('hasta', '') if dates['hasta'] else ''}
+    return query, filters
+
+
+@app.get('/auditoria-empresa', response_class=HTMLResponse)
+def company_audit(request: Request, db: Session = Depends(get_db)):
+    require(request, db, {'superadmin'}, allow_no_hospital=True)
+    query, filters = company_audit_filters(request, db)
+    page_raw = request.query_params.get('page', '1')
+    page = min(int(page_raw), 100000) if page_raw.isdigit() and int(page_raw) > 0 else 1
+    total = db.scalar(select(func.count()).select_from(query.subquery()))
+    items = db.scalars(query.order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
+                       .offset((page - 1) * AUDIT_PAGE_SIZE).limit(AUDIT_PAGE_SIZE)).all()
+    actions = db.scalars(select(AuditLog.action).distinct().order_by(AuditLog.action)).all()
+    entities = db.scalars(select(AuditLog.entity).distinct().order_by(AuditLog.entity)).all()
+    actors = db.scalars(select(User).where(User.id.in_(select(AuditLog.actor_id).distinct()))
+                        .order_by(User.name)).all()
+    clients = db.scalars(select(Hospital).order_by(Hospital.name)).all()
+    query_string = urlencode({key: value for key, value in filters.items()
+                              if value and not (key == 'alcance' and value == 'empresa')})
+    return template(request, db, 'audit_company.html', items=items, total=total, page=page,
+                    pages=max(1, (total - 1) // AUDIT_PAGE_SIZE + 1), filters=filters, actions=actions,
+                    entities=entities, actors=actors, clients=clients, query_string=query_string)
+
+
+@app.get('/auditoria-empresa/export/xlsx')
+def company_audit_export(request: Request, db: Session = Depends(get_db)):
+    user, _ = require(request, db, {'superadmin'}, allow_no_hospital=True)
+    query, _ = company_audit_filters(request, db)
+    items = db.scalars(query.order_by(AuditLog.created_at.desc(), AuditLog.id.desc()).limit(AUDIT_EXPORT_LIMIT)).all()
+    hospitals = {h.id: h.name for h in db.scalars(select(Hospital))}
+    log(db, user, None, 'exportar', 'auditoria', None, f'{len(items)} registros')
+    db.commit()
+    return xlsx_response('auditoria_empresa.xlsx', 'Auditoría',
+        ['Fecha y hora', 'Hospital', 'Actor', 'Correo actor', 'Acción', 'Entidad', 'ID entidad', 'Detalle'],
+        [(format_local(e.created_at), hospitals.get(e.hospital_id, 'Empresa'), e.actor.name,
+          e.actor.email, e.action, e.entity, e.entity_id, e.detail) for e in items])
 
 
 # Database initialization is handled by the FastAPI lifespan context above.

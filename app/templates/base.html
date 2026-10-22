@@ -18,7 +18,8 @@
    {% if is_provider %}<span class="nav-label">EMPRESA PRESTADORA</span>
    <a href="/operaciones/tickets" class="nav-link {% if request.url.path.startswith('/operaciones') %}active{% endif %}">▤ Todos los hospitales</a>
    <a href="/equipo" class="nav-link {% if request.url.path.startswith('/equipo') %}active{% endif %}">♙ Equipo de técnicos</a>
-   <a href="/bodega" class="nav-link {% if request.url.path.startswith('/bodega') %}active{% endif %}">▧ Bodega central</a>{% endif %}
+   <a href="/bodega" class="nav-link {% if request.url.path.startswith('/bodega') %}active{% endif %}">▧ Bodega central</a>
+   {% if user.role == 'superadmin' %}<a href="/auditoria-empresa" class="nav-link {% if request.url.path.startswith('/auditoria-empresa') %}active{% endif %}">◷ Auditoría empresa</a>{% endif %}{% endif %}
    {% if is_provider_technician %}<a href="/mis-tickets" class="nav-link">▤ Mis tickets multihospital</a><a href="/mis-repuestos" class="nav-link">▧ Mis repuestos</a>{% endif %}
    <span class="nav-label">PRINCIPAL</span>
    <a href="/dashboard" class="nav-link {% if request.url.path == '/dashboard' %}active{% endif %}"><span class="nav-icon">▦</span>Panel general</a>
